@@ -1,6 +1,7 @@
 ﻿#include <math.h>
 #include <stdio.h>
 #include <algorithm>
+#include <vector>
 
 void fft(float re[], float im[], int N, int inv)
 {
@@ -163,24 +164,30 @@ namespace LatticeReverb3
 	class LatticeCascade
 	{
 	public:
-		constexpr static int NumLayers = 8;
+		constexpr static int NumLayers = 6;
 		constexpr static int MaxDelayLength = 48000;
 
 	private:
+		float roomSize = 4800;
+
 		DelayLine<MaxDelayLength> delays[NumLayers];
 		float ks[NumLayers];
 		float ds[NumLayers];
-		float roomSize = 4800;
+		float outks[NumLayers];
 
+		float tapmix = 0;
 		template<int inLayer>//NumLayers-1
 		inline float HProcSamp(float x)
 		{
 			if constexpr (inLayer >= 0)
 			{
+				if (inLayer == NumLayers - 1) tapmix = 0;
 				float y = HProcSamp<inLayer - 1>(delays[inLayer].ReadSample());
 				float a = (x + ks[inLayer] * y) * ds[inLayer];
 				delays[inLayer].WriteSample(a);
-				return y - a * ks[inLayer];
+				float out = y - a * ks[inLayer];
+				tapmix += out * outks[inLayer];
+				return out;
 			}
 			else
 			{
@@ -189,10 +196,15 @@ namespace LatticeReverb3
 		}
 
 	public:
-		float ProcessSample(float x)
+		inline float ProcessSample(float x)// direct
 		{
 			return HProcSamp<NumLayers - 1>(x);
 		}
+		inline float GetTapMix()
+		{
+			return tapmix;
+		}
+
 		void Reset()
 		{
 			for (auto& it : delays)it.Reset();
@@ -205,7 +217,7 @@ namespace LatticeReverb3
 		{
 			for (int i = 0; i < NumLayers; ++i)this->ds[i] = ds[i];
 		}
-		void SetDelaysLength(float* delaysLength)
+		void SetDelaysLength(float* delaysLength)//归一化最大长度
 		{
 			float maxv = 0;
 			for (int i = 0; i < NumLayers; ++i)
@@ -218,12 +230,164 @@ namespace LatticeReverb3
 				delays[i].SetDelayTime(delayt);
 			}
 		}
+		void SetOutKs(float* outKs)//归一化能量
+		{
+			float energy = 0;
+			for (int i = 0; i < NumLayers; ++i)
+			{
+				energy += outKs[i] * outKs[i];
+			}
+			energy = sqrtf(energy) * sqrtf(NumLayers);
+			for (int i = 0; i < NumLayers; ++i)
+			{
+				float outk = outKs[i] / energy;
+				outks[i] = outk;
+			}
+		}
 		void SetRoomSize(float roomSize)
 		{
 			this->roomSize = roomSize;
 		}
 	};
+
+	class LatticeReverb3
+	{
+	private:
+		LatticeCascade latl, latr;
+		DelayLine<LatticeCascade::MaxDelayLength> crossDelayL, crossDelayR;
+		struct RoomParams
+		{
+			float tsl[LatticeCascade::NumLayers];//延迟线长度比例
+			float tsr[LatticeCascade::NumLayers];
+			float fbtl;
+			float fbtr;
+			//反射系数受diffusion约束
+			float ksl[LatticeCascade::NumLayers];//各节反射系数
+			float ksr[LatticeCascade::NumLayers];
+			//衰减系数受decayTime约束
+			float dsl[LatticeCascade::NumLayers];//各节衰减系数
+			float dsr[LatticeCascade::NumLayers];
+			float fbdl;//莫比乌斯环结构的反馈衰减系数
+			float fbdr;
+
+			float outksl[LatticeCascade::NumLayers];//各节tap输出混合比例
+			float outksr[LatticeCascade::NumLayers];//各节tap输出混合比例
+		};
+		struct ReverbParams
+		{
+			float roomSize = 4800;
+			float decayTime = 0.99;//这个需要算RT60补偿
+			float diffusion = 1.0;
+			float mixTapDirect = 0.0;
+		};
+		RoomParams roomParams, applyRoomParams;
+		ReverbParams reverbParams;
+	public:
+		void Reset()
+		{
+			latl.Reset();
+			latr.Reset();
+			crossDelayL.Reset();
+			crossDelayR.Reset();
+		}
+		void ProcessBlock(const float* inl, const float* inr, float* outl, float* outr, int numSamples)
+		{
+			for (int i = 0; i < numSamples; ++i)
+			{
+				float lastoutl = crossDelayL.ReadSample();
+				float lastoutr = crossDelayR.ReadSample();
+				float xl = inl[i] + lastoutr * applyRoomParams.fbdl;
+				float xr = inr[i] + lastoutl * applyRoomParams.fbdr;
+				float outvl = latl.ProcessSample(xl);
+				float outvr = latr.ProcessSample(xr);
+				crossDelayL.WriteSample(outvr);//cross
+				crossDelayR.WriteSample(outvl);
+				float tapMixOutl = latl.GetTapMix();
+				float tapMixOutr = latr.GetTapMix();
+
+				outl[i] = outvl * (1.0f - reverbParams.mixTapDirect) + tapMixOutl * reverbParams.mixTapDirect;
+				outr[i] = outvr * (1.0f - reverbParams.mixTapDirect) + tapMixOutr * reverbParams.mixTapDirect;
+			}
+		}
+		void SetRoomSize(float roomSize)
+		{
+			reverbParams.roomSize = roomSize;
+			applyRoomParams.fbtl = roomParams.fbtl * roomSize;
+			applyRoomParams.fbtr = roomParams.fbtr * roomSize;
+			latl.SetRoomSize(roomSize);
+			latr.SetRoomSize(roomSize);
+			for (int i = 0; i < LatticeCascade::NumLayers; ++i)
+			{
+				applyRoomParams.tsl[i] = roomParams.tsl[i];
+				applyRoomParams.tsr[i] = roomParams.tsr[i];
+			}
+			latl.SetDelaysLength(applyRoomParams.tsl);
+			latr.SetDelaysLength(applyRoomParams.tsr);
+			crossDelayL.SetDelayTime(applyRoomParams.fbtl);
+			crossDelayR.SetDelayTime(applyRoomParams.fbtr);
+		}
+		void SetDecayTime(float decayTime)//n代表n秒之后到达-60dB
+		{
+			reverbParams.decayTime = decayTime;
+			for (int i = 0; i < LatticeCascade::NumLayers; ++i)
+			{
+				applyRoomParams.dsl[i] = roomParams.dsl[i] * reverbParams.decayTime;
+				applyRoomParams.dsr[i] = roomParams.dsr[i] * reverbParams.decayTime;
+			}
+			applyRoomParams.fbdl = roomParams.fbdl * reverbParams.decayTime;
+			applyRoomParams.fbdr = roomParams.fbdr * reverbParams.decayTime;
+			latl.SetDs(applyRoomParams.dsl);
+			latr.SetDs(applyRoomParams.dsr);
+		}
+		void SetDiffusion(float diffusion)//0-1
+		{
+			reverbParams.diffusion = diffusion;
+			for (int i = 0; i < LatticeCascade::NumLayers; ++i)
+			{
+				applyRoomParams.ksl[i] = roomParams.ksl[i] * diffusion;
+				applyRoomParams.ksr[i] = roomParams.ksr[i] * diffusion;
+			}
+			latl.SetKs(applyRoomParams.ksl);
+			latr.SetKs(applyRoomParams.ksr);
+		}
+		void SetMixTapDirect(float mix)//0-1
+		{
+			reverbParams.mixTapDirect = mix;
+		}
+		void SetupRoomCharacteristics(std::vector<float>& roomParamsPack)
+		{
+			for (int i = 0; i < LatticeCascade::NumLayers; ++i)
+			{
+				roomParams.tsl[i] = roomParamsPack[i + 0 * LatticeCascade::NumLayers];
+				roomParams.tsr[i] = roomParamsPack[i + 1 * LatticeCascade::NumLayers];
+				roomParams.ksl[i] = roomParamsPack[i + 2 * LatticeCascade::NumLayers];
+				roomParams.ksr[i] = roomParamsPack[i + 3 * LatticeCascade::NumLayers];
+				roomParams.dsl[i] = roomParamsPack[i + 4 * LatticeCascade::NumLayers];
+				roomParams.dsr[i] = roomParamsPack[i + 5 * LatticeCascade::NumLayers];
+				roomParams.outksl[i] = roomParamsPack[i + 6 * LatticeCascade::NumLayers];
+				roomParams.outksr[i] = roomParamsPack[i + 7 * LatticeCascade::NumLayers];
+			}
+			roomParams.fbdl = roomParamsPack[8 * LatticeCascade::NumLayers + 0];
+			roomParams.fbdr = roomParamsPack[8 * LatticeCascade::NumLayers + 1];
+			roomParams.fbtl = roomParamsPack[8 * LatticeCascade::NumLayers + 2];
+			roomParams.fbtr = roomParamsPack[8 * LatticeCascade::NumLayers + 3];
+
+			SetRoomSize(reverbParams.roomSize);
+			SetDecayTime(reverbParams.decayTime);
+			SetDiffusion(reverbParams.diffusion);
+			SetMixTapDirect(reverbParams.mixTapDirect);
+			latl.SetOutKs(roomParams.outksl);
+			latr.SetOutKs(roomParams.outksr);
+		}
+	};
 }
+
+/*
+优化方向：
+频谱方差小（无染色且噪）
+接近RT60（方便校准）
+左右声道相位差 方差大（声场宽）
+*/
 int main()
 {
 
