@@ -522,7 +522,7 @@ private:
 
 		float specflatloss = s2 * 100.0;
 		float diffloss = avgl - avgr;
-		diffloss = diffloss * diffloss * 1000.0;
+		diffloss = diffloss * diffloss * 100.0;
 		return specflatloss + diffloss;
 		//return specflatloss;
 	}
