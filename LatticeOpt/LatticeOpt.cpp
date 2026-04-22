@@ -282,7 +282,7 @@ namespace LatticeReverb3
 		};
 		struct ReverbParams
 		{
-			float roomSize = 2400;//roomsize在这里改！！！
+			float roomSize = 3000;//roomsize在这里改！！！
 			float decayTime = 0.99;//这个需要算RT60补偿
 			float diffusion = 1.0;
 			float mixTapDirect = 0.5;
@@ -388,23 +388,36 @@ namespace LatticeReverb3
 
 			Reset();
 		}
+		float randf()
+		{
+			return (float)(rand() % 1000) / 1000.0f * (rand() % 2 ? 1 : -1);
+		}
 		void InitRoomParams(std::vector<float>& roomParamsPack)
 		{
 			for (int i = 0; i < LatticeCascade::NumLayers; ++i)
 			{
-				roomParamsPack[i + 0 * LatticeCascade::NumLayers] = (float)(rand() % 1000) / 1000.0f;//tsl
-				roomParamsPack[i + 1 * LatticeCascade::NumLayers] = (float)(rand() % 1000) / 1000.0f;//tsr
-				roomParamsPack[i + 2 * LatticeCascade::NumLayers] = (float)(rand() % 1000) / 1000.0f;//ksl
-				roomParamsPack[i + 3 * LatticeCascade::NumLayers] = (float)(rand() % 1000) / 1000.0f;//ksr
-				roomParamsPack[i + 4 * LatticeCascade::NumLayers] = 1.0;//dsl
-				roomParamsPack[i + 5 * LatticeCascade::NumLayers] = 1.0;//dsr
-				roomParamsPack[i + 6 * LatticeCascade::NumLayers] = (float)(rand() % 1000) / 1000.0f;//outksl
-				roomParamsPack[i + 7 * LatticeCascade::NumLayers] = (float)(rand() % 1000) / 1000.0f;//outksr
+				float tsl = fabsf(randf()) * 0.8 + 0.2;//tsl
+				float tsr = fabsf(randf()) * 0.8 + 0.2;//tsr
+				float ksl = randf();//ksl
+				float ksr = randf();//ksr
+				float dsl = randf() * 0.05 + 0.95;//dsl
+				float dsr = randf() * 0.05 + 0.95;//dsr
+				float outksl = randf();//outksl
+				float outksr = randf();//outksr
+
+				roomParamsPack[i + 0 * LatticeCascade::NumLayers] = tsl;//tsl
+				roomParamsPack[i + 1 * LatticeCascade::NumLayers] = tsr;//tsr
+				roomParamsPack[i + 2 * LatticeCascade::NumLayers] = ksl;//ksl
+				roomParamsPack[i + 3 * LatticeCascade::NumLayers] = ksr;//ksr
+				roomParamsPack[i + 4 * LatticeCascade::NumLayers] = dsl;//dsl
+				roomParamsPack[i + 5 * LatticeCascade::NumLayers] = dsr;//dsr
+				roomParamsPack[i + 6 * LatticeCascade::NumLayers] = outksl;//outksl
+				roomParamsPack[i + 7 * LatticeCascade::NumLayers] = outksr;//outksr
 			}
-			roomParamsPack[8 * LatticeCascade::NumLayers + 0] = -0.5;//fbdl
-			roomParamsPack[8 * LatticeCascade::NumLayers + 1] = 0.5;//fbdr
-			roomParamsPack[8 * LatticeCascade::NumLayers + 2] = (float)(rand() % 1000) / 1000.0f;//fbtl
-			roomParamsPack[8 * LatticeCascade::NumLayers + 3] = (float)(rand() % 1000) / 1000.0f;//fbtr
+			roomParamsPack[8 * LatticeCascade::NumLayers + 0] = -0.75;//fbdl
+			roomParamsPack[8 * LatticeCascade::NumLayers + 1] = -0.75;//fbdr
+			roomParamsPack[8 * LatticeCascade::NumLayers + 2] = fabsf(randf());//fbtl
+			roomParamsPack[8 * LatticeCascade::NumLayers + 3] = fabsf(randf());//fbtr
 		}
 	};
 }
@@ -421,6 +434,7 @@ class LatticeOptimizer
 public:
 	constexpr static int NumRoomParams = LatticeReverb3::LatticeReverb3::NumRoomParams;
 	constexpr static int NumLayers = LatticeReverb3::LatticeReverb3::NumLayers;
+	constexpr static int testBlockSize = 16384;
 private:
 	LatticeReverb3::LatticeReverb3 instance;
 	AdamOptimizer optimizer;
@@ -432,41 +446,14 @@ private:
 		float v = 1.0 - expf(-fabsf(x));
 		return v * (1.0 - minv) + minv;
 	}
-	void Regularization(std::vector<float>& roomParams)
+	inline float tanhfno0(float x, float minv = 0.0)
 	{
-		for (int i = 0; i < NumLayers; ++i)
-		{
-			auto& tsl = roomParams[i + 0 * NumLayers];
-			auto& tsr = roomParams[i + 1 * NumLayers];
-			auto& ksl = roomParams[i + 2 * NumLayers];
-			auto& ksr = roomParams[i + 3 * NumLayers];
-			auto& dsl = roomParams[i + 4 * NumLayers];
-			auto& dsr = roomParams[i + 5 * NumLayers];
-			auto& outksl = roomParams[i + 6 * NumLayers];
-			auto& outksr = roomParams[i + 7 * NumLayers];
-
-			tsl = soft01(tsl);
-			tsr = soft01(tsr);
-			ksl = tanhf(ksl);
-			ksr = tanhf(ksr);
-			dsl = soft01(dsl, 0.98) * 0.99999999;
-			dsr = soft01(dsr, 0.98) * 0.99999999;
-			outksl = soft01(outksl);
-			outksr = soft01(outksr);
-		}
-
-		auto& fbdl = roomParams[8 * NumLayers + 0];
-		auto& fbdr = roomParams[8 * NumLayers + 1];
-		auto& fbtl = roomParams[8 * NumLayers + 2];
-		auto& fbtr = roomParams[8 * NumLayers + 3];
-
-		fbtl = soft01(fbtl);
-		fbtr = soft01(fbtr);
-		fbdl = -soft01(fbdl, 0.5) * 0.99999999;
-		fbdr = -soft01(fbdr, 0.5) * 0.99999999;
+		float v = tanhf(x);
+		if (v > 0)v = v * (1.0f - minv) + minv;
+		else v = v * (1.0f - minv) - minv;
+		return v;
 	}
 
-	constexpr static int testBlockSize = 2048;
 	float zeroBuf[testBlockSize] = { 0 };
 	float bufrel[testBlockSize];
 	float bufiml[testBlockSize];
@@ -482,8 +469,6 @@ private:
 		instance.Reset();
 		float tmpl = 1, tmpr = 1;
 		instance.ProcessBlock(&tmpl, &tmpr, &tmpl, &tmpr, 1);//impulse response
-		//instance.ProcessBlock(zeroBuf, zeroBuf, bufrel, bufrer, testBlockSize);
-		//instance.ProcessBlock(zeroBuf, zeroBuf, bufrel, bufrer, testBlockSize);
 		instance.ProcessBlock(zeroBuf, zeroBuf, bufrel, bufrer, testBlockSize);
 		for (int i = 0; i < testBlockSize; ++i)
 		{
@@ -499,8 +484,9 @@ private:
 		float avg = 0;
 		float avgl = 0, avgr = 0;
 		float s2 = 0;
-		const int numBins = testBlockSize / 2 * 0.5;//只关心nyquist*0.5以内的频响
-
+		float s2l = 0, s2r = 0;
+		const int numBins = testBlockSize / 2 * 0.4;//只关心nyquist*0.5以内的频响
+		float specmax = 1e-30, specmin = 1e30;
 		for (int i = 0; i < numBins; ++i)
 		{
 			float maglv = sqrtf(bufrel[i] * bufrel[i] + bufiml[i] * bufiml[i]);
@@ -510,23 +496,203 @@ private:
 			avg += (maglv + magrv) * 0.5;
 			avgl += maglv;
 			avgr += magrv;
+			if (specmax < maglv)specmax = maglv;
+			if (specmax < magrv)specmax = magrv;
+			if (specmin > maglv)specmin = maglv;
+			if (specmin > magrv)specmin = magrv;
 		}
 		avg /= numBins;
 		avgl /= numBins;
 		avgr /= numBins;
+		specmax /= avg;
+		specmin /= avg;
 		for (int i = 0; i < numBins; ++i)
 		{
 			float magv = (magl[i] + magr[i]) * 0.5 / avg;
+			float magvl = magl[i] / avgl;
+			float magvr = magr[i] / avgr;
 			s2 += (magv - 1.0) * (magv - 1.0);
+			s2l += (magvl - 1.0) * (magvl - 1.0);
+			s2r += (magvr - 1.0) * (magvr - 1.0);
 		}
 
-		float specflatloss = s2 * 100.0;
+		float specflatloss = (s2 * 0.25 + max(s2l, s2r) * 0.75) * 100.0;
 		float diffloss = avgl - avgr;
-		diffloss = diffloss * diffloss * 1000.0;
-		return specflatloss + diffloss;
+		float maxminloss = specmax - specmin;
+		diffloss = diffloss * diffloss * 1.0;
+		maxminloss = maxminloss * maxminloss * 1.0;
+		return  maxminloss;
 		//return specflatloss;
 	}
+	/////////////////////////////////////////////////////////////
+
+	float targetReL[testBlockSize];
+	float targetImL[testBlockSize];
+	float targetReR[testBlockSize];
+	float targetImR[testBlockSize];
+
+	float magCurL[testBlockSize / 2];
+	float magCurR[testBlockSize / 2];
+	float magTarL[testBlockSize / 2];
+	float magTarR[testBlockSize / 2];
+
+	float phaseCurL[testBlockSize / 2];
+	float phaseCurR[testBlockSize / 2];
+	float phaseTarL[testBlockSize / 2];
+	float phaseTarR[testBlockSize / 2];
+
+	float gdCurL[testBlockSize / 2];
+	float gdCurR[testBlockSize / 2];
+	float gdTarL[testBlockSize / 2];
+	float gdTarR[testBlockSize / 2];
+
+	float ErrorGlobalIR(std::vector<float>& roomParamsPack)
+	{
+		std::copy(roomParamsPack.begin(), roomParamsPack.end(), applyRoomParams.begin());
+		Regularization(applyRoomParams);
+		instance.SetupRoomCharacteristics(applyRoomParams);
+		instance.Reset();
+
+		// 生成当前参数对应的 IR
+		float tmpl = 1.0f, tmpr = 1.0f;
+		instance.ProcessBlock(&tmpl, &tmpr, &tmpl, &tmpr, 1);
+		instance.ProcessBlock(zeroBuf, zeroBuf, bufrel, bufrer, testBlockSize);
+
+		// 拷贝目标 IR 到频域缓冲
+		for (int i = 0; i < testBlockSize; ++i)
+		{
+			// 当前 IR
+			bufiml[i] = 0.0f;
+			bufimr[i] = 0.0f;
+
+			// 目标 IR
+			targetReL[i] = global_ir_l[i];
+			targetImL[i] = 0.0f;
+			targetReR[i] = global_ir_r[i];
+			targetImR[i] = 0.0f;
+		}
+
+		// 频域变换
+		fft(bufrel, bufiml, testBlockSize, 1);
+		fft(bufrer, bufimr, testBlockSize, 1);
+		fft(targetReL, targetImL, testBlockSize, 1);
+		fft(targetReR, targetImR, testBlockSize, 1);
+
+		const int numBins = testBlockSize / 2 - 2;
+		const float eps = 1e-20f;
+		const float dOmega = 2.0f * 3.1415926535897932384626f / (float)testBlockSize;
+
+		// 计算幅度和相位
+		for (int i = 0; i < numBins; ++i)
+		{
+			float crl = bufrel[i];
+			float cil = bufiml[i];
+			float crr = bufrer[i];
+			float cir = bufimr[i];
+
+			float trl = targetReL[i];
+			float til = targetImL[i];
+			float trr = targetReR[i];
+			float tir = targetImR[i];
+
+			magCurL[i] = sqrtf(crl * crl + cil * cil) + eps;
+			magCurR[i] = sqrtf(crr * crr + cir * cir) + eps;
+			magTarL[i] = sqrtf(trl * trl + til * til) + eps;
+			magTarR[i] = sqrtf(trr * trr + tir * tir) + eps;
+
+			phaseCurL[i] = atan2f(cil, crl);
+			phaseCurR[i] = atan2f(cir, crr);
+			phaseTarL[i] = atan2f(til, trl);
+			phaseTarR[i] = atan2f(tir, trr);
+		}
+
+		// unwrap phase
+		auto unwrapPhase = [&](float* ph)
+			{
+				for (int i = 1; i < numBins; ++i)
+				{
+					float d = ph[i] - ph[i - 1];
+					while (d > 3.1415926535897932384626f)
+					{
+						ph[i] -= 2.0f * 3.1415926535897932384626f;
+						d = ph[i] - ph[i - 1];
+					}
+					while (d < -3.1415926535897932384626f)
+					{
+						ph[i] += 2.0f * 3.1415926535897932384626f;
+						d = ph[i] - ph[i - 1];
+					}
+				}
+			};
+
+		unwrapPhase(phaseCurL);
+		unwrapPhase(phaseCurR);
+		unwrapPhase(phaseTarL);
+		unwrapPhase(phaseTarR);
+
+		// 群延迟（物理定义：-dphi/domega）
+		// 用中心差分，边界用单边差分
+		gdCurL[0] = -(phaseCurL[1] - phaseCurL[0]) / dOmega;
+		gdCurR[0] = -(phaseCurR[1] - phaseCurR[0]) / dOmega;
+		gdTarL[0] = -(phaseTarL[1] - phaseTarL[0]) / dOmega;
+		gdTarR[0] = -(phaseTarR[1] - phaseTarR[0]) / dOmega;
+
+		for (int i = 1; i < numBins - 1; ++i)
+		{
+			gdCurL[i] = -(phaseCurL[i + 1] - phaseCurL[i - 1]) / (2.0f * dOmega);
+			gdCurR[i] = -(phaseCurR[i + 1] - phaseCurR[i - 1]) / (2.0f * dOmega);
+			gdTarL[i] = -(phaseTarL[i + 1] - phaseTarL[i - 1]) / (2.0f * dOmega);
+			gdTarR[i] = -(phaseTarR[i + 1] - phaseTarR[i - 1]) / (2.0f * dOmega);
+		}
+
+		gdCurL[numBins - 1] = -(phaseCurL[numBins - 1] - phaseCurL[numBins - 2]) / dOmega;
+		gdCurR[numBins - 1] = -(phaseCurR[numBins - 1] - phaseCurR[numBins - 2]) / dOmega;
+		gdTarL[numBins - 1] = -(phaseTarL[numBins - 1] - phaseTarL[numBins - 2]) / dOmega;
+		gdTarR[numBins - 1] = -(phaseTarR[numBins - 1] - phaseTarR[numBins - 2]) / dOmega;
+
+		// 误差计算
+		float magLossL = 0.0f;
+		float magLossR = 0.0f;
+		float gdLossL = 0.0f;
+		float gdLossR = 0.0f;
+
+		// 只看较低到中频，减少高频相位噪声影响
+		const int beginBin = 20;
+		const int endBin = (int)(numBins * 0.45f);
+
+		for (int i = beginBin; i < endBin; ++i)
+		{
+			// 对数幅度差
+			float dMagL = logf(magCurL[i]) - logf(magTarL[i]);
+			float dMagR = logf(magCurR[i]) - logf(magTarR[i]);
+			magLossL += dMagL * dMagL;
+			magLossR += dMagR * dMagR;
+
+			// 群延迟差
+			float dGdL = gdCurL[i] - gdTarL[i];
+			float dGdR = gdCurR[i] - gdTarR[i];
+			gdLossL += dGdL * dGdL;
+			gdLossR += dGdR * dGdR;
+		}
+
+		float invN = 1.0f / (float)(endBin - beginBin);
+		magLossL *= invN;
+		magLossR *= invN;
+		gdLossL *= invN;
+		gdLossR *= invN;
+
+		// 适当压一下群延迟量纲，避免它直接主导
+		float magLoss = 0.5f * (magLossL + magLossR);
+		float gdLoss = 0.5f * (gdLossL + gdLossR);
+
+		// 你可以后面自己调权重
+		float loss = magLoss * 10.0f;//+ gdLoss * 0.001f;
+		return loss;
+	}
 public:
+	float global_ir_l[testBlockSize] = { 0 };
+	float global_ir_r[testBlockSize] = { 0 };
+
 	LatticeOptimizer()
 	{
 		roomParams.resize(NumRoomParams);
@@ -535,7 +701,8 @@ public:
 		instance.InitRoomParams(applyRoomParams);
 		optimizer.SetupOptimizer(LatticeReverb3::LatticeReverb3::NumRoomParams,
 			roomParams, 0.005f);
-		optimizer.SetErrorFunc([this](std::vector<float>& params) {return Error(params); });
+		//optimizer.SetErrorFunc([this](std::vector<float>& params) {return Error(params); });
+		optimizer.SetErrorFunc([this](std::vector<float>& params) {return ErrorGlobalIR(params); });
 	}
 	void RunOptimizer(int numCycle)
 	{
@@ -550,6 +717,47 @@ public:
 		optimizer.GetNowVec(roomParams);
 		Regularization(roomParams);
 		std::copy(roomParams.begin(), roomParams.end(), outParams.begin());
+	}
+
+	void Regularization(std::vector<float>& roomParams)
+	{
+		for (int i = 0; i < NumLayers; ++i)
+		{
+			auto& tsl = roomParams[i + 0 * NumLayers];
+			auto& tsr = roomParams[i + 1 * NumLayers];
+			auto& ksl = roomParams[i + 2 * NumLayers];
+			auto& ksr = roomParams[i + 3 * NumLayers];
+			auto& dsl = roomParams[i + 4 * NumLayers];
+			auto& dsr = roomParams[i + 5 * NumLayers];
+			auto& outksl = roomParams[i + 6 * NumLayers];
+			auto& outksr = roomParams[i + 7 * NumLayers];
+
+			tsl = soft01(tsl, 0.01);
+			tsr = soft01(tsr, 0.01);
+			ksl = tanhfno0(ksl, 0.05) * 0.7999999;
+			ksr = tanhfno0(ksr, 0.05) * 0.7999999;
+			dsl = soft01(dsl, 0.98) * 0.99999999;
+			dsr = soft01(dsr, 0.98) * 0.99999999;
+			outksl = soft01(outksl, 0.01);
+			outksr = soft01(outksr, 0.01);
+		}
+
+		auto& fbdl = roomParams[8 * NumLayers + 0];
+		auto& fbdr = roomParams[8 * NumLayers + 1];
+		auto& fbtl = roomParams[8 * NumLayers + 2];
+		auto& fbtr = roomParams[8 * NumLayers + 3];
+
+		fbtl = soft01(fbtl, 0.01);
+		fbtr = soft01(fbtr, 0.01);
+		fbdl = soft01(fbdl, 0.85) * 0.99999999;
+		fbdr = soft01(fbdr, 0.85) * 0.99999999;
+	}
+	void Reset()
+	{
+		instance.Reset();
+		instance.InitRoomParams(roomParams);
+		instance.InitRoomParams(applyRoomParams);
+		optimizer.SetBasin(roomParams);
 	}
 };
 
@@ -937,14 +1145,499 @@ namespace IRCheckpoint
 	}
 }
 ///////////////////////////////////////////////////////////////////////
+namespace IRTrainDataGen
+{
+	constexpr int SampleRate = 48000;
+	constexpr int IRSeconds = 5;
+	constexpr int IRNumSamples = SampleRate * IRSeconds;
+
+	static LatticeReverb3::LatticeReverb3 s_reverb;
+
+	static float s_inL[1] = { 1.0f };
+	static float s_inR[1] = { 1.0f };
+	static float s_out0L[1] = { 0.0f };
+	static float s_out0R[1] = { 0.0f };
+
+	static float s_zeroL[IRNumSamples - 1] = { 0.0f };
+	static float s_zeroR[IRNumSamples - 1] = { 0.0f };
+	static float s_irL[IRNumSamples] = { 0.0f };
+	static float s_irR[IRNumSamples] = { 0.0f };
+
+	static int g_index = 0;
+
+	// ================= IO =================
+	static short FloatToPcm16(float x)
+	{
+		if (x > 1.0f) x = 1.0f;
+		if (x < -1.0f) x = -1.0f;
+		int v = (int)lrintf(x * 32767.0f);
+		if (v > 32767) v = 32767;
+		if (v < -32768) v = -32768;
+		return (short)v;
+	}
+
+	static void WriteLE16(FILE* fp, unsigned short v)
+	{
+		unsigned char b[2];
+		b[0] = v & 0xFF;
+		b[1] = (v >> 8) & 0xFF;
+		fwrite(b, 1, 2, fp);
+	}
+
+	static void WriteLE32(FILE* fp, unsigned int v)
+	{
+		unsigned char b[4];
+		b[0] = v & 0xFF;
+		b[1] = (v >> 8) & 0xFF;
+		b[2] = (v >> 16) & 0xFF;
+		b[3] = (v >> 24) & 0xFF;
+		fwrite(b, 1, 4, fp);
+	}
+
+	static void EnsureFolder()
+	{
+#ifdef _WIN32
+		CreateDirectoryA("traindata", NULL);
+#else
+		mkdir("traindata", 0777);
+#endif
+	}
+
+	// ================= IR =================
+	static void BuildIR(std::vector<float>& params)
+	{
+		s_reverb.SetupRoomCharacteristics(params);
+		s_reverb.Reset();
+
+		s_reverb.ProcessBlock(s_inL, s_inR, s_out0L, s_out0R, 1);
+		s_irL[0] = s_out0L[0];
+		s_irR[0] = s_out0R[0];
+
+		s_reverb.ProcessBlock(s_zeroL, s_zeroR, s_irL + 1, s_irR + 1, IRNumSamples - 1);
+	}
+
+	static void SaveWav(const char* filename)
+	{
+		FILE* fp = nullptr;
+#if defined(_MSC_VER)
+		fopen_s(&fp, filename, "wb");
+#else
+		fp = fopen(filename, "wb");
+#endif
+		if (!fp) return;
+
+		const int dataSize = IRNumSamples * 4;
+
+		fwrite("RIFF", 1, 4, fp);
+		WriteLE32(fp, 36 + dataSize);
+		fwrite("WAVE", 1, 4, fp);
+
+		fwrite("fmt ", 1, 4, fp);
+		WriteLE32(fp, 16);
+		WriteLE16(fp, 1);
+		WriteLE16(fp, 2);
+		WriteLE32(fp, SampleRate);
+		WriteLE32(fp, SampleRate * 4);
+		WriteLE16(fp, 4);
+		WriteLE16(fp, 16);
+
+		fwrite("data", 1, 4, fp);
+		WriteLE32(fp, dataSize);
+
+		for (int i = 0; i < IRNumSamples; ++i)
+		{
+			WriteLE16(fp, FloatToPcm16(s_irL[i]));
+			WriteLE16(fp, FloatToPcm16(s_irR[i]));
+		}
+
+		fclose(fp);
+	}
+
+	static void SaveParams(const char* filename, std::vector<float>& params)
+	{
+		FILE* fp = nullptr;
+#if defined(_MSC_VER)
+		fopen_s(&fp, filename, "wb");
+#else
+		fp = fopen(filename, "wb");
+#endif
+		if (!fp) return;
+
+		for (auto& v : params)
+			fprintf(fp, "%.9g\n", v);
+
+		fclose(fp);
+	}
+
+	static void SaveSample(std::vector<float>& params)
+	{
+		char wavname[256];
+		char txtname[256];
+
+		sprintf_s(wavname, "traindata/ir_%06d.wav", g_index);
+		sprintf_s(txtname, "traindata/param_%06d.txt", g_index);
+
+		BuildIR(params);
+		SaveWav(wavname);
+		SaveParams(txtname, params);
+
+		g_index++;
+	}
+
+	// ================= 主函数 =================
+	std::vector<float> params(LatticeOptimizer::NumRoomParams);
+	LatticeOptimizer opt;
+	static void GenerateDataset(int numRandom)
+	{
+		EnsureFolder();
+		for (int n = 0; n < numRandom; ++n)
+		{
+			// step0: 随机
+			opt.Reset();
+			opt.GetNowRoomParams(params);
+			opt.Regularization(params);
+			SaveSample(params);
+
+			// step1~3: 优化路径
+			for (int k = 0; k < 2; ++k)
+			{
+				opt.RunOptimizer(1);
+				opt.GetNowRoomParams(params);
+				opt.Regularization(params);
+				SaveSample(params);
+			}
+
+			printf("seed %d done (total %d samples)\n", n + 1, g_index);
+		}
+	}
+}
+///////////////////////////////////////////////////////////////////////
+namespace IROutputFromTxt
+{
+	constexpr int SampleRate = 48000;
+	constexpr int IRSeconds = 5;
+	constexpr int IRNumSamples = SampleRate * IRSeconds;
+	constexpr int NumParams = LatticeReverb3::LatticeReverb3::NumRoomParams;
+
+	// 全部静态，禁止函数内大对象/大数组
+	static LatticeReverb3::LatticeReverb3 s_reverb;
+
+	static float s_inL[1] = { 1.0f };
+	static float s_inR[1] = { 1.0f };
+	static float s_out0L[1] = { 0.0f };
+	static float s_out0R[1] = { 0.0f };
+
+	static float s_zeroL[IRNumSamples - 1] = { 0.0f };
+	static float s_zeroR[IRNumSamples - 1] = { 0.0f };
+	static float s_irL[IRNumSamples] = { 0.0f };
+	static float s_irR[IRNumSamples] = { 0.0f };
+
+	static short FloatToPcm16(float x)
+	{
+		if (x > 1.0f) x = 1.0f;
+		if (x < -1.0f) x = -1.0f;
+		int v = (int)lrintf(x * 32767.0f);
+		if (v > 32767) v = 32767;
+		if (v < -32768) v = -32768;
+		return (short)v;
+	}
+
+	static void WriteLE16(FILE* fp, unsigned short v)
+	{
+		unsigned char b[2];
+		b[0] = (unsigned char)(v & 0xFF);
+		b[1] = (unsigned char)((v >> 8) & 0xFF);
+		fwrite(b, 1, 2, fp);
+	}
+
+	static void WriteLE32(FILE* fp, unsigned int v)
+	{
+		unsigned char b[4];
+		b[0] = (unsigned char)(v & 0xFF);
+		b[1] = (unsigned char)((v >> 8) & 0xFF);
+		b[2] = (unsigned char)((v >> 16) & 0xFF);
+		b[3] = (unsigned char)((v >> 24) & 0xFF);
+		fwrite(b, 1, 4, fp);
+	}
+
+	static bool LoadParamsTxt(const char* filename, std::vector<float>& roomParams)
+	{
+		roomParams.clear();
+		roomParams.resize(NumParams);
+
+		FILE* fp = nullptr;
+#if defined(_MSC_VER)
+		if (fopen_s(&fp, filename, "rb") != 0) fp = nullptr;
+#else
+		fp = fopen(filename, "rb");
+#endif
+		if (!fp) return false;
+
+		for (int i = 0; i < NumParams; ++i)
+		{
+			if (fscanf_s(fp, "%f", &roomParams[i]) != 1)
+			{
+				fclose(fp);
+				return false;
+			}
+		}
+
+		fclose(fp);
+		return true;
+	}
+
+	static void BuildIR(std::vector<float>& roomParams)
+	{
+		s_reverb.SetupRoomCharacteristics(roomParams);
+		s_reverb.Reset();
+
+		s_inL[0] = 1.0f;
+		s_inR[0] = 1.0f;
+		s_reverb.ProcessBlock(s_inL, s_inR, s_out0L, s_out0R, 1);
+		s_irL[0] = s_out0L[0];
+		s_irR[0] = s_out0R[0];
+
+		s_reverb.ProcessBlock(s_zeroL, s_zeroR, s_irL + 1, s_irR + 1, IRNumSamples - 1);
+	}
+
+	static bool SaveWav(const char* filename)
+	{
+		FILE* fp = nullptr;
+#if defined(_MSC_VER)
+		if (fopen_s(&fp, filename, "wb") != 0) fp = nullptr;
+#else
+		fp = fopen(filename, "wb");
+#endif
+		if (!fp) return false;
+
+		const unsigned short numChannels = 2;
+		const unsigned short bitsPerSample = 16;
+		const unsigned short blockAlign = (unsigned short)(numChannels * bitsPerSample / 8);
+		const unsigned int byteRate = SampleRate * blockAlign;
+		const unsigned int dataSize = IRNumSamples * blockAlign;
+		const unsigned int riffSize = 36 + dataSize;
+
+		fwrite("RIFF", 1, 4, fp);
+		WriteLE32(fp, riffSize);
+		fwrite("WAVE", 1, 4, fp);
+
+		fwrite("fmt ", 1, 4, fp);
+		WriteLE32(fp, 16);
+		WriteLE16(fp, 1); // PCM
+		WriteLE16(fp, numChannels);
+		WriteLE32(fp, SampleRate);
+		WriteLE32(fp, byteRate);
+		WriteLE16(fp, blockAlign);
+		WriteLE16(fp, bitsPerSample);
+
+		fwrite("data", 1, 4, fp);
+		WriteLE32(fp, dataSize);
+
+		for (int i = 0; i < IRNumSamples; ++i)
+		{
+			short sl = FloatToPcm16(s_irL[i]);
+			short sr = FloatToPcm16(s_irR[i]);
+			WriteLE16(fp, (unsigned short)sl);
+			WriteLE16(fp, (unsigned short)sr);
+		}
+
+		fclose(fp);
+		return true;
+	}
+
+	// 主入口：
+	// 读取 output.txt -> 渲染 IR -> 输出 output.wav
+	static bool Render(const char* txtFilename = "output.txt", const char* wavFilename = "output.wav")
+	{
+		std::vector<float> roomParams;
+		if (!LoadParamsTxt(txtFilename, roomParams))
+		{
+			printf("Failed to load params from %s\n", txtFilename);
+			return false;
+		}
+
+		if ((int)roomParams.size() != NumParams)
+		{
+			printf("Param count mismatch: got %d, expected %d\n", (int)roomParams.size(), NumParams);
+			return false;
+		}
+
+		BuildIR(roomParams);
+
+		if (!SaveWav(wavFilename))
+		{
+			printf("Failed to save wav to %s\n", wavFilename);
+			return false;
+		}
+
+		printf("Rendered IR wav: %s\n", wavFilename);
+		return true;
+	}
+}
+///////////////////////////////////////////////////////////////////////
+namespace IRLoadFromWav
+{
+	static float ReadFloatSample16(short v)
+	{
+		return (float)v / 32768.0f;
+	}
+
+	static float ReadFloatSample32(float v)
+	{
+		return v;
+	}
+
+	static bool Load(const char* filename, LatticeOptimizer& opt)
+	{
+		FILE* fp = nullptr;
+#if defined(_MSC_VER)
+		if (fopen_s(&fp, filename, "rb") != 0) fp = nullptr;
+#else
+		fp = fopen(filename, "rb");
+#endif
+		if (!fp)
+		{
+			printf("Failed to open %s\n", filename);
+			return false;
+		}
+
+		// ===== 读 WAV header =====
+		char chunkId[4];
+		unsigned int chunkSize;
+		char format[4];
+
+		fread(chunkId, 1, 4, fp); // RIFF
+		fread(&chunkSize, 4, 1, fp);
+		fread(format, 1, 4, fp);  // WAVE
+
+		unsigned short audioFormat = 1;
+		unsigned short numChannels = 0;
+		unsigned int sampleRate = 0;
+		unsigned short bitsPerSample = 0;
+
+		// 找 fmt 和 data
+		while (!feof(fp))
+		{
+			char subchunkId[4];
+			unsigned int subchunkSize;
+
+			if (fread(subchunkId, 1, 4, fp) != 4) break;
+			fread(&subchunkSize, 4, 1, fp);
+
+			if (memcmp(subchunkId, "fmt ", 4) == 0)
+			{
+				fread(&audioFormat, 2, 1, fp);
+				fread(&numChannels, 2, 1, fp);
+				fread(&sampleRate, 4, 1, fp);
+
+				fseek(fp, 6, SEEK_CUR); // byteRate + blockAlign
+				fread(&bitsPerSample, 2, 1, fp);
+
+				fseek(fp, subchunkSize - 16, SEEK_CUR);
+			}
+			else if (memcmp(subchunkId, "data", 4) == 0)
+			{
+				int bytesPerSample = bitsPerSample / 8;
+				int totalSamples = subchunkSize / bytesPerSample / numChannels;
+
+				const int N = LatticeOptimizer::testBlockSize;
+
+				for (int i = 0; i < N; ++i)
+				{
+					float l = 0.0f;
+					float r = 0.0f;
+
+					if (i < totalSamples)
+					{
+						if (audioFormat == 1 && bitsPerSample == 16)
+						{
+							short s[2] = { 0,0 };
+							fread(s, sizeof(short), numChannels, fp);
+
+							if (numChannels == 1)
+							{
+								l = r = ReadFloatSample16(s[0]);
+							}
+							else
+							{
+								l = ReadFloatSample16(s[0]);
+								r = ReadFloatSample16(s[1]);
+							}
+						}
+						else if (audioFormat == 3 && bitsPerSample == 32)
+						{
+							float s[2] = { 0,0 };
+							fread(s, sizeof(float), numChannels, fp);
+
+							if (numChannels == 1)
+							{
+								l = r = s[0];
+							}
+							else
+							{
+								l = s[0];
+								r = s[1];
+							}
+						}
+						else
+						{
+							printf("Unsupported wav format\n");
+							fclose(fp);
+							return false;
+						}
+					}
+
+					opt.global_ir_l[i] = l;
+					opt.global_ir_r[i] = r;
+				}
+
+				fclose(fp);
+
+				// ===== RMS 归一化（强烈建议）=====
+				float energy = 0.0f;
+				for (int i = 0; i < N; ++i)
+				{
+					energy += opt.global_ir_l[i] * opt.global_ir_l[i];
+					energy += opt.global_ir_r[i] * opt.global_ir_r[i];
+				}
+
+				float rms = sqrtf(energy / (float)(2 * N) + 1e-20f);
+				if (rms > 1e-6f)
+				{
+					float inv = 1.0f / rms;
+					for (int i = 0; i < N; ++i)
+					{
+						opt.global_ir_l[i] *= inv;
+						opt.global_ir_r[i] *= inv;
+					}
+				}
+
+				printf("Loaded IR from %s (sr=%d, ch=%d)\n", filename, sampleRate, numChannels);
+				return true;
+			}
+			else
+			{
+				fseek(fp, subchunkSize, SEEK_CUR);
+			}
+		}
+
+		fclose(fp);
+		printf("Invalid WAV file\n");
+		return false;
+	}
+}
+///////////////////////////////////////////////////////////////////////
 LatticeOptimizer lattopt;
 std::vector<float> roomParams(LatticeOptimizer::NumRoomParams);
 float minLoss = 1e30f;
 int main()
 {
+	//IRTrainDataGen::GenerateDataset(25);
+	//IROutputFromTxt::Render();
+	IRLoadFromWav::Load("target_ir.wav", lattopt);
 	for (;;)
 	{
-		lattopt.RunOptimizer(20);
+		lattopt.RunOptimizer(1);
 		float nowloss = lattopt.GetNowLoss();
 		printf("loss:%.5f %s\n", nowloss, nowloss < minLoss ? "(new minloss)" : "");
 		lattopt.GetNowRoomParams(roomParams);
