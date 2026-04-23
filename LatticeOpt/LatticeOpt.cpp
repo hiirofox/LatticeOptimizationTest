@@ -282,10 +282,10 @@ namespace LatticeReverb3
 		};
 		struct ReverbParams
 		{
-			float roomSize = 3000;//roomsize在这里改！！！
-			float decayTime = 0.99;//这个需要算RT60补偿
+			float roomSize = 1200;//roomsize在这里改！！！
+			float decayTime = 0.9999;//这个需要算RT60补偿
 			float diffusion = 1.0;
-			float mixTapDirect = 0.5;
+			float mixTapDirect = 0.2;
 		};
 		RoomParams roomParams, applyRoomParams;
 		ReverbParams reverbParams;
@@ -400,8 +400,8 @@ namespace LatticeReverb3
 				float tsr = fabsf(randf()) * 0.8 + 0.2;//tsr
 				float ksl = randf();//ksl
 				float ksr = randf();//ksr
-				float dsl = randf() * 0.05 + 0.95;//dsl
-				float dsr = randf() * 0.05 + 0.95;//dsr
+				float dsl = randf() * 0.1 + 0.90;//dsl
+				float dsr = randf() * 0.1 + 0.90;//dsr
 				float outksl = randf();//outksl
 				float outksr = randf();//outksr
 
@@ -434,7 +434,8 @@ class LatticeOptimizer
 public:
 	constexpr static int NumRoomParams = LatticeReverb3::LatticeReverb3::NumRoomParams;
 	constexpr static int NumLayers = LatticeReverb3::LatticeReverb3::NumLayers;
-	constexpr static int testBlockSize = 16384;
+	constexpr static int testBlockSize = 512;
+	//这个设的反而越小越好
 private:
 	LatticeReverb3::LatticeReverb3 instance;
 	AdamOptimizer optimizer;
@@ -459,8 +460,16 @@ private:
 	float bufiml[testBlockSize];
 	float bufrer[testBlockSize];
 	float bufimr[testBlockSize];
+
+	float autocorrl[testBlockSize * 2];
+	float autocorrr[testBlockSize * 2];
+	float autocorriml[testBlockSize * 2];
+	float autocorrimr[testBlockSize * 2];
+
 	float magl[testBlockSize / 2];
 	float magr[testBlockSize / 2];
+	float gdl[testBlockSize / 2];
+	float gdr[testBlockSize / 2];
 	float Error(std::vector<float>& roomParamsPack)
 	{
 		std::copy(roomParamsPack.begin(), roomParamsPack.end(), applyRoomParams.begin());
@@ -470,6 +479,40 @@ private:
 		float tmpl = 1, tmpr = 1;
 		instance.ProcessBlock(&tmpl, &tmpr, &tmpl, &tmpr, 1);//impulse response
 		instance.ProcessBlock(zeroBuf, zeroBuf, bufrel, bufrer, testBlockSize);
+		//instance.ProcessBlock(zeroBuf, zeroBuf, bufrel, bufrer, testBlockSize);
+		for (int i = 0; i < testBlockSize; ++i)
+		{
+			//float window = 0.5f * (1.0f - cosf(2.0f * 3.1415926535897932384626f * i / testBlockSize));
+			float window = 1.0;
+			autocorrl[i] = bufrel[i] * window;
+			autocorrr[i] = bufrer[i] * window;
+			autocorrl[testBlockSize + i] = 0;
+			autocorrr[testBlockSize + i] = 0;
+		}
+		for (int i = 0; i < testBlockSize * 2; ++i)
+		{
+			autocorriml[i] = 0;
+			autocorrimr[i] = 0;
+		}
+		fft(autocorrl, autocorriml, testBlockSize * 2, 1);
+		fft(autocorrr, autocorrimr, testBlockSize * 2, 1);
+		for (int i = 0; i < testBlockSize * 2; ++i)
+		{
+			autocorrl[i] = autocorrl[i] * autocorrl[i] + autocorriml[i] * autocorriml[i];
+			autocorrr[i] = autocorrr[i] * autocorrr[i] + autocorrimr[i] * autocorrimr[i];
+			autocorriml[i] = 0;
+			autocorrimr[i] = 0;
+		}
+		fft(autocorrl, autocorriml, testBlockSize * 2, -1);
+		fft(autocorrr, autocorrimr, testBlockSize * 2, -1);
+		float maxcorrl = 1e-30f;
+		float maxcorrr = 1e-30f;
+		for (int i = 1; i < testBlockSize * 2 - 1; ++i)
+		{
+			if (maxcorrl < autocorrl[i])maxcorrl = autocorrl[i];
+			if (maxcorrr < autocorrr[i])maxcorrr = autocorrr[i];
+		}
+
 		for (int i = 0; i < testBlockSize; ++i)
 		{
 			float window = 0.5f * (1.0f - cosf(2.0f * 3.1415926535897932384626f * i / testBlockSize));
@@ -485,9 +528,14 @@ private:
 		float avgl = 0, avgr = 0;
 		float s2 = 0;
 		float s2l = 0, s2r = 0;
-		const int numBins = testBlockSize / 2 * 0.4;//只关心nyquist*0.5以内的频响
+		const int numBins = testBlockSize / 2 * 0.7;//只关心nyquist*0.5以内的频响
 		float specmax = 1e-30, specmin = 1e30;
-		for (int i = 0; i < numBins; ++i)
+		float lastphasel = 0, lastphaser = 0;
+		float gdavgl = 0, gdavgr = 0;
+		float gds2l = 0, gds2r = 0;
+
+		int startbin = 20;
+		for (int i = startbin; i < numBins; ++i)
 		{
 			float maglv = sqrtf(bufrel[i] * bufrel[i] + bufiml[i] * bufiml[i]);
 			float magrv = sqrtf(bufrer[i] * bufrer[i] + bufimr[i] * bufimr[i]);
@@ -500,13 +548,34 @@ private:
 			if (specmax < magrv)specmax = magrv;
 			if (specmin > maglv)specmin = maglv;
 			if (specmin > magrv)specmin = magrv;
+
+			const float PI = 3.14159265358979323846f;
+			const float deltaOmega = 2.0f * PI / testBlockSize;
+			float phasel = atan2f(bufiml[i], bufrel[i]);
+			float phaser = atan2f(bufimr[i], bufrer[i]);
+			float dphil = phasel - lastphasel;
+			float dphir = phaser - lastphaser;
+			while (dphil > PI) dphil -= 2.0f * PI;
+			while (dphil < -PI) dphil += 2.0f * PI;
+			while (dphir > PI) dphir -= 2.0f * PI;
+			while (dphir < -PI) dphir += 2.0f * PI;
+			float groupdelayl = -dphil / deltaOmega;
+			float groupdelayr = -dphir / deltaOmega;
+			lastphasel = phasel;
+			lastphaser = phaser;
+			gdavgl += groupdelayl;
+			gdavgr += groupdelayr;
+			gdl[i] = groupdelayl;
+			gdr[i] = groupdelayr;
 		}
-		avg /= numBins;
-		avgl /= numBins;
-		avgr /= numBins;
+		avg /= numBins - startbin;
+		avgl /= numBins - startbin;
+		avgr /= numBins - startbin;
+		gdavgl /= numBins - startbin;
+		gdavgr /= numBins - startbin;
 		specmax /= avg;
 		specmin /= avg;
-		for (int i = 0; i < numBins; ++i)
+		for (int i = startbin; i < numBins; ++i)
 		{
 			float magv = (magl[i] + magr[i]) * 0.5 / avg;
 			float magvl = magl[i] / avgl;
@@ -514,15 +583,21 @@ private:
 			s2 += (magv - 1.0) * (magv - 1.0);
 			s2l += (magvl - 1.0) * (magvl - 1.0);
 			s2r += (magvr - 1.0) * (magvr - 1.0);
+			float groupdelayl = gdl[i] / gdavgl;
+			float groupdelayr = gdr[i] / gdavgr;
+			gds2l += (groupdelayl - 1.0) * (groupdelayl - 1.0);
+			gds2r += (groupdelayr - 1.0) * (groupdelayr - 1.0);
 		}
 
-		float specflatloss = (s2 * 0.25 + max(s2l, s2r) * 0.75) * 100.0;
-		float diffloss = avgl - avgr;
-		float maxminloss = specmax - specmin;
-		diffloss = diffloss * diffloss * 1.0;
+		float specflatloss = (s2 * 0.25 + max(s2l, s2r) * 0.75) * 0.1;//能量方差平坦（这个很一般）
+		float diffloss = avgl - avgr;//左右声道能量差
+		float maxminloss = specmax - specmin;//频谱极大极小平坦（这个一般）
+		float gdloss = 1.0 / (min(gds2l, gds2r) + 0.1);//群延迟最不平坦化（这个还可以吧）
+		float maxcorrloss = logf(maxcorrl + maxcorrr + max(maxcorrl, maxcorrr) * 4.0) + 80.0;//自相关峰值越小越好（这个效果不错）
+		diffloss = diffloss * diffloss * 100000.0;
 		maxminloss = maxminloss * maxminloss * 1.0;
-		return  maxminloss;
-		//return specflatloss;
+		gdloss = 1000.0 / (gdloss + 1e-20f);
+		return  maxcorrloss;
 	}
 	/////////////////////////////////////////////////////////////
 
@@ -700,9 +775,9 @@ public:
 		instance.InitRoomParams(roomParams);
 		instance.InitRoomParams(applyRoomParams);
 		optimizer.SetupOptimizer(LatticeReverb3::LatticeReverb3::NumRoomParams,
-			roomParams, 0.005f);
-		//optimizer.SetErrorFunc([this](std::vector<float>& params) {return Error(params); });
-		optimizer.SetErrorFunc([this](std::vector<float>& params) {return ErrorGlobalIR(params); });
+			roomParams, 0.05f);
+		optimizer.SetErrorFunc([this](std::vector<float>& params) {return Error(params); });
+		//optimizer.SetErrorFunc([this](std::vector<float>& params) {return ErrorGlobalIR(params); });
 	}
 	void RunOptimizer(int numCycle)
 	{
@@ -734,10 +809,10 @@ public:
 
 			tsl = soft01(tsl, 0.01);
 			tsr = soft01(tsr, 0.01);
-			ksl = tanhfno0(ksl, 0.05) * 0.7999999;
-			ksr = tanhfno0(ksr, 0.05) * 0.7999999;
-			dsl = soft01(dsl, 0.98) * 0.99999999;
-			dsr = soft01(dsr, 0.98) * 0.99999999;
+			ksl = tanhfno0(ksl, 0.05) * 0.9;
+			ksr = tanhfno0(ksr, 0.05) * 0.9;
+			dsl = soft01(dsl, 0.9995) * 0.99999999;
+			dsr = soft01(dsr, 0.9995) * 0.99999999;
 			outksl = soft01(outksl, 0.01);
 			outksr = soft01(outksr, 0.01);
 		}
@@ -749,8 +824,8 @@ public:
 
 		fbtl = soft01(fbtl, 0.01);
 		fbtr = soft01(fbtr, 0.01);
-		fbdl = soft01(fbdl, 0.85) * 0.99999999;
-		fbdr = soft01(fbdr, 0.85) * 0.99999999;
+		fbdl = -soft01(fbdl, 0.65) * 0.99999999;
+		fbdr = -soft01(fbdr, 0.65) * 0.99999999;
 	}
 	void Reset()
 	{
@@ -1022,6 +1097,7 @@ namespace IRCheckpoint
 
 	static void BuildIR(std::vector<float>& roomParams)
 	{
+		s_reverb.SetRoomSize(2400);///////////////////////////////!
 		s_reverb.SetupRoomCharacteristics(roomParams);
 		s_reverb.Reset();
 
@@ -1634,7 +1710,7 @@ int main()
 {
 	//IRTrainDataGen::GenerateDataset(25);
 	//IROutputFromTxt::Render();
-	IRLoadFromWav::Load("target_ir.wav", lattopt);
+	//IRLoadFromWav::Load("target_ir.wav", lattopt);
 	for (;;)
 	{
 		lattopt.RunOptimizer(1);
