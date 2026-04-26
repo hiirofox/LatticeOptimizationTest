@@ -1925,14 +1925,13 @@ std::vector<float> roomParams(LatticeOptimizer::NumRoomParams);
 float minLoss = 1e30f;
 int main()
 {
-	ReverbCLTest::ReverbCLOptimizer::RandomSearchConfig searchConfig;
-	searchConfig.numTasks = 200;
+	ReverbCLTest::ReverbCLOptimizer::CMAConfig searchConfig;
+	searchConfig.numTasks = 500;
 	searchConfig.eliteCount = 64;
-	searchConfig.initialRadius = 2.5f;
-	searchConfig.minRadius = 0.01f;
-	searchConfig.radiusShrink = 0.985f;
-	searchConfig.eliteStdScale = 1.5f;
-	searchConfig.centerBlend = 0.72f;
+	searchConfig.initialSigma = 2.0f;
+	searchConfig.minSigma = 0.001f;
+	searchConfig.maxSigma = 12.0f;
+	searchConfig.eigenUpdateEvery = 1;
 
-	return ReverbCLTest::ReverbCLOptimizer::RunRandomSearchForever(searchConfig) ? 0 : 1;
+	return ReverbCLTest::ReverbCLOptimizer::RunCMAForever(searchConfig) ? 0 : 1;
 }

@@ -24,8 +24,8 @@ namespace ReverbCLTest
 {
 	constexpr int NumLayers = 6;
 	constexpr int NumParams = 8 * NumLayers + 4;
-	constexpr int NumTasks = 100;
-	constexpr int TestBlockSize = 65536 * 8;
+	constexpr int NumTasks = 500;
+	constexpr int TestBlockSize = 65536 * 4;
 	constexpr int MaxDelay = 8192;
 	constexpr int DelayLines = 14;
 	constexpr int DelayScratchFloatsPerTask = DelayLines * MaxDelay;
@@ -1057,6 +1057,347 @@ namespace ReverbCLTest
 		inline bool RunRandomSearchForever(RandomSearchConfig config = RandomSearchConfig())
 		{
 			RandomSearchOptimizer optimizer(config);
+			return optimizer.RunForever();
+		}
+
+		struct CMAConfig
+		{
+			int numTasks = NumTasks;
+			int eliteCount = 0;
+			unsigned int seed = 20260426u;
+			float initialSigma = 2.0f;
+			float minSigma = 0.001f;
+			float maxSigma = 12.0f;
+			float rawClamp = 12.0f;
+			int checkpointSamples = CheckpointSamples;
+			int eigenUpdateEvery = 1;
+		};
+
+		class CMAOptimizer
+		{
+		private:
+			using Vec = Eigen::VectorXf;
+			using Mat = Eigen::MatrixXf;
+
+			CMAConfig cfg;
+			LossBatchEvaluator evaluator;
+			std::mt19937 rng;
+			std::normal_distribution<float> normal;
+
+			Vec mean;
+			Mat cov;
+			Mat eigenBasis;
+			Vec axisScale;
+			Mat invSqrtCov;
+			Vec evolutionCov;
+			Vec evolutionSigma;
+			Vec weights;
+
+			std::vector<float> params;
+			std::vector<float> losses;
+			std::vector<float> bestRaw;
+			std::vector<float> radius;
+
+			float sigma = 1.0f;
+			float mueff = 1.0f;
+			float cc = 0.0f;
+			float cs = 0.0f;
+			float c1 = 0.0f;
+			float cmu = 0.0f;
+			float damps = 0.0f;
+			float chiN = 1.0f;
+			float bestLoss = std::numeric_limits<float>::infinity();
+			int iteration = 0;
+
+		private:
+			float ClampRaw(float v) const
+			{
+				if (v > cfg.rawClamp) return cfg.rawClamp;
+				if (v < -cfg.rawClamp) return -cfg.rawClamp;
+				return v;
+			}
+
+			void InitializeMean()
+			{
+				mean = Vec::Zero(NumParams);
+				for (int i = 0; i < NumLayers; ++i)
+				{
+					mean[i + 4 * NumLayers] = 2.0f;
+					mean[i + 5 * NumLayers] = 2.0f;
+				}
+				mean[8 * NumLayers + 0] = 0.5f;
+				mean[8 * NumLayers + 1] = 0.5f;
+			}
+
+			void InitializeWeightsAndRates()
+			{
+				const int n = NumParams;
+				if (cfg.eliteCount <= 0)
+					cfg.eliteCount = cfg.numTasks / 2;
+				if (cfg.eliteCount < 2)
+					cfg.eliteCount = 2;
+				if (cfg.eliteCount > cfg.numTasks)
+					cfg.eliteCount = cfg.numTasks;
+
+				weights = Vec::Zero(cfg.eliteCount);
+				float sumWeights = 0.0f;
+				for (int i = 0; i < cfg.eliteCount; ++i)
+				{
+					weights[i] = std::log((float)cfg.eliteCount + 0.5f) - std::log((float)i + 1.0f);
+					sumWeights += weights[i];
+				}
+				weights /= sumWeights;
+				mueff = 1.0f / weights.squaredNorm();
+
+				const float nf = (float)n;
+				cc = (4.0f + mueff / nf) / (nf + 4.0f + 2.0f * mueff / nf);
+				cs = (mueff + 2.0f) / (nf + mueff + 5.0f);
+				c1 = 2.0f / (((nf + 1.3f) * (nf + 1.3f)) + mueff);
+				cmu = (std::min)(1.0f - c1, 2.0f * (mueff - 2.0f + 1.0f / mueff) / (((nf + 2.0f) * (nf + 2.0f)) + mueff));
+				if (cmu < 0.0f)
+					cmu = 0.0f;
+				damps = 1.0f + 2.0f * (std::max)(0.0f, std::sqrt((mueff - 1.0f) / (nf + 1.0f)) - 1.0f) + cs;
+				chiN = std::sqrt(nf) * (1.0f - 1.0f / (4.0f * nf) + 1.0f / (21.0f * nf * nf));
+			}
+
+			void InitializeSearch()
+			{
+				InitializeWeightsAndRates();
+				InitializeMean();
+
+				sigma = cfg.initialSigma;
+				cov = Mat::Identity(NumParams, NumParams);
+				eigenBasis = Mat::Identity(NumParams, NumParams);
+				axisScale = Vec::Ones(NumParams);
+				invSqrtCov = Mat::Identity(NumParams, NumParams);
+				evolutionCov = Vec::Zero(NumParams);
+				evolutionSigma = Vec::Zero(NumParams);
+
+				params.assign((size_t)cfg.numTasks * NumParams, 0.0f);
+				losses.assign(cfg.numTasks, 0.0f);
+				bestRaw.assign(NumParams, 0.0f);
+				radius.assign(NumParams, sigma);
+			}
+
+			void CopyVectorToCandidate(int task, const Vec& src)
+			{
+				float* dst = params.data() + (size_t)task * NumParams;
+				for (int j = 0; j < NumParams; ++j)
+					dst[j] = ClampRaw(src[j]);
+			}
+
+			void BuildCandidates()
+			{
+				CopyVectorToCandidate(0, mean);
+
+				int randomStart = 1;
+				if (bestLoss < std::numeric_limits<float>::infinity())
+				{
+					for (int j = 0; j < NumParams; ++j)
+						params[NumParams + j] = bestRaw[j];
+					randomStart = 2;
+				}
+
+				for (int task = randomStart; task < cfg.numTasks; ++task)
+				{
+					Vec z(NumParams);
+					for (int j = 0; j < NumParams; ++j)
+						z[j] = normal(rng);
+
+					Vec y = eigenBasis * axisScale.asDiagonal() * z;
+					Vec x = mean + sigma * y;
+					CopyVectorToCandidate(task, x);
+				}
+			}
+
+			Vec CandidateVector(int task) const
+			{
+				Vec v(NumParams);
+				const float* src = params.data() + (size_t)task * NumParams;
+				for (int j = 0; j < NumParams; ++j)
+					v[j] = src[j];
+				return v;
+			}
+
+			void UpdateAxisRadius()
+			{
+				for (int j = 0; j < NumParams; ++j)
+					radius[j] = sigma * std::sqrt((std::max)(0.0f, cov(j, j)));
+			}
+
+			void UpdateEigensystem()
+			{
+				cov = 0.5f * (cov + cov.transpose()).eval();
+
+				Eigen::SelfAdjointEigenSolver<Mat> solver(cov);
+				if (solver.info() != Eigen::Success)
+				{
+					cov += Mat::Identity(NumParams, NumParams) * 1.0e-6f;
+					solver.compute(cov);
+				}
+
+				Vec eigenValues = solver.eigenvalues();
+				for (int i = 0; i < NumParams; ++i)
+				{
+					if (!std::isfinite(eigenValues[i]) || eigenValues[i] < 1.0e-12f)
+						eigenValues[i] = 1.0e-12f;
+				}
+
+				eigenBasis = solver.eigenvectors();
+				axisScale = eigenValues.cwiseSqrt();
+				Vec invAxis = axisScale.cwiseInverse();
+				invSqrtCov = eigenBasis * invAxis.asDiagonal() * eigenBasis.transpose();
+				cov = eigenBasis * eigenValues.asDiagonal() * eigenBasis.transpose();
+				cov = 0.5f * (cov + cov.transpose()).eval();
+				UpdateAxisRadius();
+			}
+
+			void UpdateDistribution(const std::vector<int>& order)
+			{
+				const Vec oldMean = mean;
+				mean.setZero();
+				for (int e = 0; e < cfg.eliteCount; ++e)
+					mean += weights[e] * CandidateVector(order[e]);
+				for (int j = 0; j < NumParams; ++j)
+					mean[j] = ClampRaw(mean[j]);
+
+				const Vec yWeighted = (mean - oldMean) / sigma;
+				const float csFactor = std::sqrt(cs * (2.0f - cs) * mueff);
+				evolutionSigma = (1.0f - cs) * evolutionSigma + csFactor * (invSqrtCov * yWeighted);
+
+				const float normSigma = evolutionSigma.norm();
+				const float correction = std::sqrt(1.0f - std::pow(1.0f - cs, 2.0f * (float)(iteration + 1)));
+				const float hsigLimit = (1.4f + 2.0f / ((float)NumParams + 1.0f)) * chiN;
+				const bool hsig = correction > 0.0f && normSigma / correction < hsigLimit;
+
+				const float ccFactor = std::sqrt(cc * (2.0f - cc) * mueff);
+				evolutionCov = (1.0f - cc) * evolutionCov + (hsig ? ccFactor : 0.0f) * yWeighted;
+
+				Mat rankMu = Mat::Zero(NumParams, NumParams);
+				for (int e = 0; e < cfg.eliteCount; ++e)
+				{
+					const Vec y = (CandidateVector(order[e]) - oldMean) / sigma;
+					rankMu += weights[e] * (y * y.transpose());
+				}
+
+				const float oldCovScale = 1.0f - c1 - cmu + (hsig ? 0.0f : c1 * cc * (2.0f - cc));
+				cov = oldCovScale * cov + c1 * (evolutionCov * evolutionCov.transpose()) + cmu * rankMu;
+				cov = 0.5f * (cov + cov.transpose()).eval();
+
+				sigma *= std::exp((cs / damps) * (normSigma / chiN - 1.0f));
+				if (!std::isfinite(sigma))
+					sigma = cfg.initialSigma;
+				if (sigma < cfg.minSigma)
+					sigma = cfg.minSigma;
+				if (sigma > cfg.maxSigma)
+					sigma = cfg.maxSigma;
+
+				if (cfg.eigenUpdateEvery < 1)
+					cfg.eigenUpdateEvery = 1;
+				if ((iteration % cfg.eigenUpdateEvery) == 0)
+					UpdateEigensystem();
+				else
+					UpdateAxisRadius();
+			}
+
+			void PrintCMAState() const
+			{
+				const float minAxis = axisScale.minCoeff();
+				const float maxAxis = axisScale.maxCoeff();
+				const float cond = minAxis > 0.0f ? maxAxis / minAxis : std::numeric_limits<float>::infinity();
+				std::printf(
+					"cma    %05d sigma=%.6f axis[min=%.6f max=%.6f cond=%.6f] ps=%.6f\n",
+					iteration,
+					sigma,
+					minAxis,
+					maxAxis,
+					cond,
+					evolutionSigma.norm());
+			}
+
+			bool SaveBestCheckpoint()
+			{
+				if (!SaveCheckpoint(evaluator, bestRaw, cfg.checkpointSamples))
+				{
+					std::printf("CMAOptimizer: failed to write checkpoint.txt/checkpoint.wav\n");
+					return false;
+				}
+
+				std::printf("CMAOptimizer: saved checkpoint loss=%.9g\n", bestLoss);
+				return true;
+			}
+
+		public:
+			explicit CMAOptimizer(CMAConfig config = CMAConfig())
+				: cfg(config), rng(config.seed), normal(0.0f, 1.0f)
+			{
+				if (cfg.numTasks < 4)
+					cfg.numTasks = 4;
+				if (cfg.initialSigma <= 0.0f)
+					cfg.initialSigma = 1.0f;
+				if (cfg.minSigma <= 0.0f)
+					cfg.minSigma = 0.001f;
+				if (cfg.maxSigma < cfg.minSigma)
+					cfg.maxSigma = cfg.minSigma;
+				InitializeSearch();
+			}
+
+			bool Step()
+			{
+				BuildCandidates();
+
+				if (!evaluator.Evaluate(params.data(), cfg.numTasks, losses))
+					return false;
+
+				for (float& loss : losses)
+				{
+					if (!std::isfinite(loss))
+						loss = std::numeric_limits<float>::infinity();
+				}
+
+				std::vector<int> order(cfg.numTasks);
+				for (int i = 0; i < cfg.numTasks; ++i)
+					order[i] = i;
+				std::sort(order.begin(), order.end(),
+					[this](int a, int b)
+					{
+						return losses[a] < losses[b];
+					});
+
+				const int bestIndex = order.front();
+				const float iterBest = losses[bestIndex];
+				bool improved = false;
+
+				if (std::isfinite(iterBest) && iterBest < bestLoss)
+				{
+					bestLoss = iterBest;
+					bestRaw.assign(
+						params.begin() + (size_t)bestIndex * NumParams,
+						params.begin() + (size_t)(bestIndex + 1) * NumParams);
+					improved = true;
+					if (!SaveBestCheckpoint())
+						return false;
+				}
+
+				UpdateDistribution(order);
+				PrintIterationStats(iteration, losses, order, cfg.eliteCount, bestLoss, radius, improved);
+				PrintCMAState();
+				++iteration;
+				return true;
+			}
+
+			bool RunForever()
+			{
+				while (Step())
+				{
+				}
+				return false;
+			}
+		};
+
+		inline bool RunCMAForever(CMAConfig config = CMAConfig())
+		{
+			CMAOptimizer optimizer(config);
 			return optimizer.RunForever();
 		}
 	}

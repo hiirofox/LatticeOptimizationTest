@@ -3,7 +3,7 @@
 
 #define LR_NUM_LAYERS 6
 #define LR_NUM_PARAMS 52
-#define LR_TEST_BLOCK_SIZE (65536*8)
+#define LR_TEST_BLOCK_SIZE (65536)
 #define LR_AUTO_FFT_SIZE (LR_TEST_BLOCK_SIZE*2)
 #define LR_MAX_DELAY 8192
 #define LR_DELAY_LINES 14
@@ -296,8 +296,8 @@ static void lr_reverb_setup(LatticeReverbCL* r, float rp[LR_NUM_PARAMS])
 		outksr[i] = rp[i + 7 * LR_NUM_LAYERS];
 	}
 
-	r->latl.roomSize = 1200.0f;
-	r->latr.roomSize = 1200.0f;
+	r->latl.roomSize = 600.0f;
+	r->latr.roomSize = 600.0f;
 	lr_cascade_set_delays_length(&r->latl, tsl);
 	lr_cascade_set_delays_length(&r->latr, tsr);
 
@@ -311,8 +311,8 @@ static void lr_reverb_setup(LatticeReverbCL* r, float rp[LR_NUM_PARAMS])
 
 	r->fbdl = rp[8 * LR_NUM_LAYERS + 0] * 0.9999f;
 	r->fbdr = rp[8 * LR_NUM_LAYERS + 1] * 0.9999f;
-	lr_delay_set_delay_time(&r->crossDelayL, rp[8 * LR_NUM_LAYERS + 2] * 1200.0f);
-	lr_delay_set_delay_time(&r->crossDelayR, rp[8 * LR_NUM_LAYERS + 3] * 1200.0f);
+	lr_delay_set_delay_time(&r->crossDelayL, rp[8 * LR_NUM_LAYERS + 2] * r->latl.roomSize);
+	lr_delay_set_delay_time(&r->crossDelayR, rp[8 * LR_NUM_LAYERS + 3] * r->latr.roomSize);
 
 	lr_cascade_set_outks(&r->latl, outksl);
 	lr_cascade_set_outks(&r->latr, outksr);
