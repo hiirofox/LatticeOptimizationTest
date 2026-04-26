@@ -21,7 +21,7 @@ namespace ReverbCLTest
 {
 	constexpr int NumLayers = 6;
 	constexpr int NumParams = 8 * NumLayers + 4;
-	constexpr int NumTasks = 1000;
+	constexpr int NumTasks = 100;
 	constexpr int MaxDelay = 8192;
 	constexpr int DelayLines = 14;
 	constexpr int ScratchFloatsPerTask = DelayLines * MaxDelay;
@@ -624,7 +624,7 @@ namespace ReverbCLTest
 
 		struct RandomSearchConfig
 		{
-			int numTasks = 10000;
+			int numTasks = NumTasks;
 			int eliteCount = 64;
 			unsigned int seed = 20260426u;
 			float initialRadius = 2.5f;
