@@ -180,7 +180,9 @@ namespace LatticeReverb3
 		float outks[NumLayers];
 
 		float tapmix = 0;
+		
 		template<int inLayer>//NumLayers-1
+		/*
 		inline float HProcSamp(float x)
 		{
 			if constexpr (inLayer >= 0)
@@ -198,7 +200,32 @@ namespace LatticeReverb3
 				return x;
 			}
 		}
-
+		*/
+		inline float HProcSamp(float x)//如果重写成cl版本，使用这个无递归模板的分支
+		{
+			if constexpr (inLayer >= 0)
+			{
+				if constexpr (inLayer == NumLayers - 1) tapmix = 0.0f;
+				float xs[inLayer + 1];
+				float cur = x;
+				for (int i = inLayer; i >= 0; --i)
+				{
+					xs[i] = cur;
+					cur = delays[i].ReadSample();
+				}
+				float y = cur;
+				for (int i = 0; i <= inLayer; ++i)
+				{
+					float a = (xs[i] + ks[i] * y) * ds[i];
+					delays[i].WriteSample(a);
+					float out = y - a * ks[i];
+					tapmix += out * outks[i];
+					y = out;
+				}
+				return y;
+			}
+			else return x;
+		}
 	public:
 		inline float ProcessSample(float x)// direct
 		{

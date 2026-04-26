@@ -15,12 +15,66 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="LatticeOpt.cpp">
+    <ClCompile Include="src\LatticeOpt.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="optimizer.h">
+    <ClInclude Include="src\optimizer.h">
+      <Filter>源文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_d3d10.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_d3d11.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_dx9_media_sharing.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_dx9_media_sharing_intel.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_egl.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_ext.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_ext_intel.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_function_types.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_gl.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_gl_ext.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_half.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_icd.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_layer.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_platform.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_va_api_media_sharing_intel.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\cl_version.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CL\opencl.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>
