@@ -1926,7 +1926,7 @@ float minLoss = 1e30f;
 int main()
 {
 	ReverbCLTest::ReverbCLOptimizer::RandomSearchConfig searchConfig;
-	searchConfig.numTasks = 10;
+	searchConfig.numTasks = 200;
 	searchConfig.eliteCount = 64;
 	searchConfig.initialRadius = 2.5f;
 	searchConfig.minRadius = 0.01f;

@@ -3,15 +3,30 @@
 
 #define LR_NUM_LAYERS 6
 #define LR_NUM_PARAMS 52
-#define LR_TEST_BLOCK_SIZE 2048
+#define LR_TEST_BLOCK_SIZE (65536*8)
 #define LR_AUTO_FFT_SIZE (LR_TEST_BLOCK_SIZE*2)
 #define LR_MAX_DELAY 8192
 #define LR_DELAY_LINES 14
+#define LR_DELAY_SCRATCH_FLOATS (LR_DELAY_LINES * LR_MAX_DELAY)
+#define LR_LOSS_SCRATCH_FLOATS (LR_TEST_BLOCK_SIZE * 14)
 
 #define LR_LINE_LATL0 0
 #define LR_LINE_LATR0 6
 #define LR_LINE_CROSS_L 12
 #define LR_LINE_CROSS_R 13
+
+#define LR_SCRATCH_BUFREL 0
+#define LR_SCRATCH_BUFRER (LR_SCRATCH_BUFREL + LR_TEST_BLOCK_SIZE)
+#define LR_SCRATCH_BUFIML (LR_SCRATCH_BUFRER + LR_TEST_BLOCK_SIZE)
+#define LR_SCRATCH_BUFIMR (LR_SCRATCH_BUFIML + LR_TEST_BLOCK_SIZE)
+#define LR_SCRATCH_AUTOCORRL (LR_SCRATCH_BUFIMR + LR_TEST_BLOCK_SIZE)
+#define LR_SCRATCH_AUTOCORRR (LR_SCRATCH_AUTOCORRL + LR_AUTO_FFT_SIZE)
+#define LR_SCRATCH_AUTOCORRIML (LR_SCRATCH_AUTOCORRR + LR_AUTO_FFT_SIZE)
+#define LR_SCRATCH_AUTOCORRIMR (LR_SCRATCH_AUTOCORRIML + LR_AUTO_FFT_SIZE)
+#define LR_SCRATCH_MAGL (LR_SCRATCH_AUTOCORRIMR + LR_AUTO_FFT_SIZE)
+#define LR_SCRATCH_MAGR (LR_SCRATCH_MAGL + LR_TEST_BLOCK_SIZE / 2)
+#define LR_SCRATCH_GDL (LR_SCRATCH_MAGR + LR_TEST_BLOCK_SIZE / 2)
+#define LR_SCRATCH_GDR (LR_SCRATCH_GDL + LR_TEST_BLOCK_SIZE / 2)
 
 #define LR_PI 3.1415926535897932384626f
 
@@ -323,7 +338,7 @@ static void lr_reverb_process_sample(LatticeReverbCL* r, float inl, float inr, f
 	*outr = outvr * (1.0f - r->mixTapDirect) + tapMixOutr * r->mixTapDirect;
 }
 
-static void lr_fft(float re[], float im[], int n, int inv)
+static void lr_fft(__global float* re, __global float* im, int n, int inv)
 {
 	int j = 0;
 	for (int i = 1; i < n; ++i)
@@ -388,22 +403,24 @@ static void lr_fft(float re[], float im[], int n, int inv)
 static float lr_eval_loss_one(const __global float* rawParams, __global float* taskScratch)
 {
 	float rp[LR_NUM_PARAMS];
-	float bufrel[LR_TEST_BLOCK_SIZE];
-	float bufrer[LR_TEST_BLOCK_SIZE];
-	float bufiml[LR_TEST_BLOCK_SIZE];
-	float bufimr[LR_TEST_BLOCK_SIZE];
-	float autocorrl[LR_AUTO_FFT_SIZE];
-	float autocorrr[LR_AUTO_FFT_SIZE];
-	float autocorriml[LR_AUTO_FFT_SIZE];
-	float autocorrimr[LR_AUTO_FFT_SIZE];
-	float magl[LR_TEST_BLOCK_SIZE / 2];
-	float magr[LR_TEST_BLOCK_SIZE / 2];
-	float gdl[LR_TEST_BLOCK_SIZE / 2];
-	float gdr[LR_TEST_BLOCK_SIZE / 2];
+	__global float* delayScratch = taskScratch;
+	__global float* lossScratch = taskScratch + LR_DELAY_SCRATCH_FLOATS;
+	__global float* bufrel = lossScratch + LR_SCRATCH_BUFREL;
+	__global float* bufrer = lossScratch + LR_SCRATCH_BUFRER;
+	__global float* bufiml = lossScratch + LR_SCRATCH_BUFIML;
+	__global float* bufimr = lossScratch + LR_SCRATCH_BUFIMR;
+	__global float* autocorrl = lossScratch + LR_SCRATCH_AUTOCORRL;
+	__global float* autocorrr = lossScratch + LR_SCRATCH_AUTOCORRR;
+	__global float* autocorriml = lossScratch + LR_SCRATCH_AUTOCORRIML;
+	__global float* autocorrimr = lossScratch + LR_SCRATCH_AUTOCORRIMR;
+	__global float* magl = lossScratch + LR_SCRATCH_MAGL;
+	__global float* magr = lossScratch + LR_SCRATCH_MAGR;
+	__global float* gdl = lossScratch + LR_SCRATCH_GDL;
+	__global float* gdr = lossScratch + LR_SCRATCH_GDR;
 	LatticeReverbCL reverb;
 
 	lr_regularize(rawParams, rp);
-	lr_reverb_bind(&reverb, taskScratch);
+	lr_reverb_bind(&reverb, delayScratch);
 	lr_reverb_setup(&reverb, rp);
 
 	float tmpl = 1.0f;
@@ -411,7 +428,13 @@ static float lr_eval_loss_one(const __global float* rawParams, __global float* t
 	lr_reverb_process_sample(&reverb, tmpl, tmpr, &tmpl, &tmpr);
 
 	for (int i = 0; i < LR_TEST_BLOCK_SIZE; ++i)
-		lr_reverb_process_sample(&reverb, 0.0f, 0.0f, &bufrel[i], &bufrer[i]);
+	{
+		float outl;
+		float outr;
+		lr_reverb_process_sample(&reverb, 0.0f, 0.0f, &outl, &outr);
+		bufrel[i] = outl;
+		bufrer[i] = outr;
+	}
 
 	for (int i = 0; i < LR_TEST_BLOCK_SIZE; ++i)
 	{
@@ -566,7 +589,7 @@ __kernel void EvalLatticeLossBatch(
 		return;
 
 	__global const float* taskParams = params + taskId * LR_NUM_PARAMS;
-	__global float* taskScratch = delayScratch + taskId * LR_DELAY_LINES * LR_MAX_DELAY;
+	__global float* taskScratch = delayScratch + taskId * (LR_DELAY_SCRATCH_FLOATS + LR_LOSS_SCRATCH_FLOATS);
 	losses[taskId] = lr_eval_loss_one(taskParams, taskScratch);
 }
 
@@ -583,7 +606,7 @@ __kernel void RenderLatticeIRBatch(
 		return;
 
 	__global const float* taskParams = params + taskId * LR_NUM_PARAMS;
-	__global float* taskScratch = delayScratch + taskId * LR_DELAY_LINES * LR_MAX_DELAY;
+	__global float* taskScratch = delayScratch + taskId * (LR_DELAY_SCRATCH_FLOATS + LR_LOSS_SCRATCH_FLOATS);
 	__global float* taskOutL = outL + taskId * numSamples;
 	__global float* taskOutR = outR + taskId * numSamples;
 

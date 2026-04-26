@@ -5,11 +5,13 @@
 #endif
 
 #include "CL/cl.h"
+#include "Eigen/Dense"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <random>
@@ -17,14 +19,18 @@
 #include <string>
 #include <vector>
 
+
 namespace ReverbCLTest
 {
 	constexpr int NumLayers = 6;
 	constexpr int NumParams = 8 * NumLayers + 4;
 	constexpr int NumTasks = 100;
+	constexpr int TestBlockSize = 65536 * 8;
 	constexpr int MaxDelay = 8192;
 	constexpr int DelayLines = 14;
-	constexpr int ScratchFloatsPerTask = DelayLines * MaxDelay;
+	constexpr int DelayScratchFloatsPerTask = DelayLines * MaxDelay;
+	constexpr int LossScratchFloatsPerTask = 14 * TestBlockSize;
+	constexpr int ScratchFloatsPerTask = DelayScratchFloatsPerTask + LossScratchFloatsPerTask;
 
 	inline bool ReadTextFile(const char* path, std::string& out)
 	{
@@ -59,6 +65,26 @@ namespace ReverbCLTest
 		return false;
 	}
 
+	inline bool ParseKernelIntDefine(const std::string& source, const char* name, int& value)
+	{
+		const std::string needle = std::string("#define ") + name;
+		size_t pos = source.find(needle);
+		if (pos == std::string::npos)
+			return false;
+
+		pos += needle.size();
+		while (pos < source.size() && (source[pos] == ' ' || source[pos] == '\t'))
+			++pos;
+
+		char* endPtr = nullptr;
+		const long parsed = std::strtol(source.c_str() + pos, &endPtr, 10);
+		if (endPtr == source.c_str() + pos || parsed <= 0)
+			return false;
+
+		value = (int)parsed;
+		return true;
+	}
+
 	inline const char* DeviceTypeName(cl_device_type type)
 	{
 		if (type & CL_DEVICE_TYPE_GPU)
@@ -80,6 +106,7 @@ namespace ReverbCLTest
 		cl_program program = nullptr;
 		cl_kernel kernel = nullptr;
 		cl_kernel renderKernel = nullptr;
+		size_t scratchFloatsPerTask = ScratchFloatsPerTask;
 		bool initialized = false;
 
 	private:
@@ -160,6 +187,14 @@ namespace ReverbCLTest
 			std::string source;
 			if (!ReadKernelSource(source))
 				return false;
+
+			int kernelTestBlockSize = TestBlockSize;
+			int kernelMaxDelay = MaxDelay;
+			ParseKernelIntDefine(source, "LR_TEST_BLOCK_SIZE", kernelTestBlockSize);
+			ParseKernelIntDefine(source, "LR_MAX_DELAY", kernelMaxDelay);
+			scratchFloatsPerTask = (size_t)DelayLines * (size_t)kernelMaxDelay + 14u * (size_t)kernelTestBlockSize;
+			std::printf("OpenCL test: scratchPerTask=%zu floats (testBlock=%d maxDelay=%d)\n",
+				scratchFloatsPerTask, kernelTestBlockSize, kernelMaxDelay);
 
 			const char* src = source.c_str();
 			size_t len = source.size();
@@ -256,7 +291,7 @@ namespace ReverbCLTest
 
 			const size_t paramsBytes = (size_t)numTasks * NumParams * sizeof(float);
 			const size_t lossesBytes = (size_t)numTasks * sizeof(float);
-			const size_t scratchBytes = (size_t)numTasks * ScratchFloatsPerTask * sizeof(float);
+			const size_t scratchBytes = (size_t)numTasks * scratchFloatsPerTask * sizeof(float);
 
 			cl_int err = CL_SUCCESS;
 			cl_mem paramsBuf = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, paramsBytes, (void*)params, &err);
@@ -338,7 +373,7 @@ namespace ReverbCLTest
 
 			const size_t paramsBytes = (size_t)numTasks * NumParams * sizeof(float);
 			const size_t irBytes = (size_t)numTasks * numSamples * sizeof(float);
-			const size_t scratchBytes = (size_t)numTasks * ScratchFloatsPerTask * sizeof(float);
+			const size_t scratchBytes = (size_t)numTasks * scratchFloatsPerTask * sizeof(float);
 
 			cl_int err = CL_SUCCESS;
 			cl_mem paramsBuf = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, paramsBytes, (void*)params, &err);
