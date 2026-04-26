@@ -826,6 +826,27 @@ public:
 		return Error(params);
 	}
 
+	void RenderIR(std::vector<float> params, std::vector<float>& outL, std::vector<float>& outR, int numSamples)
+	{
+		Regularization(params);
+		instance.SetupRoomCharacteristics(params);
+		instance.Reset();
+
+		outL.assign(numSamples, 0.0f);
+		outR.assign(numSamples, 0.0f);
+
+		float tmpl = 1.0f;
+		float tmpr = 1.0f;
+		instance.ProcessBlock(&tmpl, &tmpr, &tmpl, &tmpr, 1);
+
+		for (int i = 0; i < numSamples; ++i)
+		{
+			float zeroL = 0.0f;
+			float zeroR = 0.0f;
+			instance.ProcessBlock(&zeroL, &zeroR, &outL[i], &outR[i], 1);
+		}
+	}
+
 	void Regularization(std::vector<float>& roomParams)
 	{
 		for (int i = 0; i < NumLayers; ++i)
@@ -869,6 +890,168 @@ public:
 };
 
 #include "ReverbCLTest.h"
+
+namespace IRCompareWav
+{
+	constexpr int SampleRate = 48000;
+	constexpr int IRSeconds = 5;
+	constexpr int IRNumSamples = SampleRate * IRSeconds;
+
+	static short FloatToPcm16(float x)
+	{
+		if (x > 1.0f) x = 1.0f;
+		if (x < -1.0f) x = -1.0f;
+		int v = (int)lrintf(x * 32767.0f);
+		if (v > 32767) v = 32767;
+		if (v < -32768) v = -32768;
+		return (short)v;
+	}
+
+	static void WriteLE16(FILE* fp, unsigned short v)
+	{
+		unsigned char b[2];
+		b[0] = (unsigned char)(v & 0xFF);
+		b[1] = (unsigned char)((v >> 8) & 0xFF);
+		fwrite(b, 1, 2, fp);
+	}
+
+	static void WriteLE32(FILE* fp, unsigned int v)
+	{
+		unsigned char b[4];
+		b[0] = (unsigned char)(v & 0xFF);
+		b[1] = (unsigned char)((v >> 8) & 0xFF);
+		b[2] = (unsigned char)((v >> 16) & 0xFF);
+		b[3] = (unsigned char)((v >> 24) & 0xFF);
+		fwrite(b, 1, 4, fp);
+	}
+
+	static bool SaveWav(const char* filename, const std::vector<float>& irL, const std::vector<float>& irR)
+	{
+		if ((int)irL.size() < IRNumSamples || (int)irR.size() < IRNumSamples)
+			return false;
+
+		FILE* fp = nullptr;
+#if defined(_MSC_VER)
+		if (fopen_s(&fp, filename, "wb") != 0) fp = nullptr;
+#else
+		fp = fopen(filename, "wb");
+#endif
+		if (!fp) return false;
+
+		const unsigned short numChannels = 2;
+		const unsigned short bitsPerSample = 16;
+		const unsigned short blockAlign = (unsigned short)(numChannels * bitsPerSample / 8);
+		const unsigned int byteRate = SampleRate * blockAlign;
+		const unsigned int dataSize = IRNumSamples * blockAlign;
+		const unsigned int riffSize = 36 + dataSize;
+
+		fwrite("RIFF", 1, 4, fp);
+		WriteLE32(fp, riffSize);
+		fwrite("WAVE", 1, 4, fp);
+
+		fwrite("fmt ", 1, 4, fp);
+		WriteLE32(fp, 16);
+		WriteLE16(fp, 1);
+		WriteLE16(fp, numChannels);
+		WriteLE32(fp, SampleRate);
+		WriteLE32(fp, byteRate);
+		WriteLE16(fp, blockAlign);
+		WriteLE16(fp, bitsPerSample);
+
+		fwrite("data", 1, 4, fp);
+		WriteLE32(fp, dataSize);
+
+		for (int i = 0; i < IRNumSamples; ++i)
+		{
+			WriteLE16(fp, (unsigned short)FloatToPcm16(irL[i]));
+			WriteLE16(fp, (unsigned short)FloatToPcm16(irR[i]));
+		}
+
+		fclose(fp);
+		return true;
+	}
+
+	static void MakeLongTailParams(std::vector<float>& params)
+	{
+		params.assign(LatticeOptimizer::NumRoomParams, 0.0f);
+
+		srand(20260426);
+		for (int i = 0; i < LatticeOptimizer::NumLayers; ++i)
+		{
+			const float r0 = (float)(rand() % 1000) / 1000.0f;
+			const float r1 = (float)(rand() % 1000) / 1000.0f;
+			const float r2 = (float)(rand() % 1000) / 1000.0f * 2.0f - 1.0f;
+			const float r3 = (float)(rand() % 1000) / 1000.0f * 2.0f - 1.0f;
+			const float r4 = (float)(rand() % 1000) / 1000.0f * 2.0f - 1.0f;
+			const float r5 = (float)(rand() % 1000) / 1000.0f * 2.0f - 1.0f;
+
+			params[i + 0 * LatticeOptimizer::NumLayers] = r0 * 2.0f + 0.25f;
+			params[i + 1 * LatticeOptimizer::NumLayers] = r1 * 2.0f + 0.25f;
+			params[i + 2 * LatticeOptimizer::NumLayers] = r2 * 0.85f;
+			params[i + 3 * LatticeOptimizer::NumLayers] = r3 * 0.85f;
+			params[i + 4 * LatticeOptimizer::NumLayers] = 8.0f;
+			params[i + 5 * LatticeOptimizer::NumLayers] = 8.0f;
+			params[i + 6 * LatticeOptimizer::NumLayers] = r4;
+			params[i + 7 * LatticeOptimizer::NumLayers] = r5;
+		}
+
+		params[8 * LatticeOptimizer::NumLayers + 0] = 2.5f;
+		params[8 * LatticeOptimizer::NumLayers + 1] = 2.5f;
+		params[8 * LatticeOptimizer::NumLayers + 2] = 1.5f;
+		params[8 * LatticeOptimizer::NumLayers + 3] = 1.7f;
+	}
+
+	LatticeOptimizer cpuRef;
+	static bool ExportCpuGpuIRPair()
+	{
+		std::vector<float> params;
+		std::vector<float> cpuL;
+		std::vector<float> cpuR;
+		std::vector<float> gpuL;
+		std::vector<float> gpuR;
+
+		MakeLongTailParams(params);
+
+		cpuRef.RenderIR(params, cpuL, cpuR, IRNumSamples);
+
+		ReverbCLTest::LossBatchEvaluator evaluator;
+		if (!evaluator.RenderIR(params.data(), 1, IRNumSamples, gpuL, gpuR))
+			return false;
+
+		if (!SaveWav("CPU_IR.wav", cpuL, cpuR))
+			return false;
+		if (!SaveWav("GPU_IR.wav", gpuL, gpuR))
+			return false;
+
+		float maxAbs = 0.0f;
+		float meanAbs = 0.0f;
+		int worstSample = 0;
+		char worstChannel = 'L';
+		for (int i = 0; i < IRNumSamples; ++i)
+		{
+			const float diffL = fabsf(cpuL[i] - gpuL[i]);
+			const float diffR = fabsf(cpuR[i] - gpuR[i]);
+			meanAbs += diffL + diffR;
+			if (diffL > maxAbs)
+			{
+				maxAbs = diffL;
+				worstSample = i;
+				worstChannel = 'L';
+			}
+			if (diffR > maxAbs)
+			{
+				maxAbs = diffR;
+				worstSample = i;
+				worstChannel = 'R';
+			}
+		}
+		meanAbs /= (float)(IRNumSamples * 2);
+
+		printf("Exported CPU_IR.wav and GPU_IR.wav (long-tail params, maxAbs=%.9g meanAbs=%.9g worstSample=%d ch=%c)\n",
+			maxAbs, meanAbs, worstSample, worstChannel);
+		return true;
+	}
+}
 
 ///////////////////////////////////////////////////////////////////////
 namespace IRPlot2D
@@ -1742,6 +1925,22 @@ std::vector<float> roomParams(LatticeOptimizer::NumRoomParams);
 float minLoss = 1e30f;
 int main()
 {
+	if (!IRCompareWav::ExportCpuGpuIRPair())
+	{
+		printf("Failed to export CPU_IR.wav/GPU_IR.wav\n");
+		return 1;
+	}
+
+	if (!ReverbCLTest::RunRandomIRSelfTest(
+		[](std::vector<float>& params, std::vector<float>& outL, std::vector<float>& outR, int numSamples)
+		{
+			cpuRef.RenderIR(params, outL, outR, numSamples);
+		}))
+	{
+		printf("OpenCL IR test failed\n");
+		return 1;
+	}
+
 	if (!ReverbCLTest::RunRandomBatchSelfTest(
 		[](std::vector<float>& params)
 		{

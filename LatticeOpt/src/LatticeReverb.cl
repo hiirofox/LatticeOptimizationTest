@@ -5,7 +5,7 @@
 #define LR_NUM_PARAMS 52
 #define LR_TEST_BLOCK_SIZE 512
 #define LR_AUTO_FFT_SIZE 1024
-#define LR_MAX_DELAY 2048
+#define LR_MAX_DELAY 8192
 #define LR_DELAY_LINES 14
 
 #define LR_LINE_LATL0 0
@@ -568,4 +568,42 @@ __kernel void EvalLatticeLossBatch(
 	__global const float* taskParams = params + taskId * LR_NUM_PARAMS;
 	__global float* taskScratch = delayScratch + taskId * LR_DELAY_LINES * LR_MAX_DELAY;
 	losses[taskId] = lr_eval_loss_one(taskParams, taskScratch);
+}
+
+__kernel void RenderLatticeIRBatch(
+	__global const float* params,
+	__global float* outL,
+	__global float* outR,
+	__global float* delayScratch,
+	const int numTasks,
+	const int numSamples)
+{
+	int taskId = get_global_id(0);
+	if (taskId >= numTasks)
+		return;
+
+	__global const float* taskParams = params + taskId * LR_NUM_PARAMS;
+	__global float* taskScratch = delayScratch + taskId * LR_DELAY_LINES * LR_MAX_DELAY;
+	__global float* taskOutL = outL + taskId * numSamples;
+	__global float* taskOutR = outR + taskId * numSamples;
+
+	float rp[LR_NUM_PARAMS];
+	LatticeReverbCL reverb;
+
+	lr_regularize(taskParams, rp);
+	lr_reverb_bind(&reverb, taskScratch);
+	lr_reverb_setup(&reverb, rp);
+
+	float tmpl = 1.0f;
+	float tmpr = 1.0f;
+	lr_reverb_process_sample(&reverb, tmpl, tmpr, &tmpl, &tmpr);
+
+	for (int i = 0; i < numSamples; ++i)
+	{
+		float l;
+		float r;
+		lr_reverb_process_sample(&reverb, 0.0f, 0.0f, &l, &r);
+		taskOutL[i] = l;
+		taskOutR[i] = r;
+	}
 }
