@@ -1925,47 +1925,14 @@ std::vector<float> roomParams(LatticeOptimizer::NumRoomParams);
 float minLoss = 1e30f;
 int main()
 {
-	if (!IRCompareWav::ExportCpuGpuIRPair())
-	{
-		printf("Failed to export CPU_IR.wav/GPU_IR.wav\n");
-		return 1;
-	}
+	ReverbCLTest::ReverbCLOptimizer::RandomSearchConfig searchConfig;
+	searchConfig.numTasks = 1000;
+	searchConfig.eliteCount = 64;
+	searchConfig.initialRadius = 2.5f;
+	searchConfig.minRadius = 0.01f;
+	searchConfig.radiusShrink = 0.985f;
+	searchConfig.eliteStdScale = 1.5f;
+	searchConfig.centerBlend = 0.72f;
 
-	if (!ReverbCLTest::RunRandomIRSelfTest(
-		[](std::vector<float>& params, std::vector<float>& outL, std::vector<float>& outR, int numSamples)
-		{
-			cpuRef.RenderIR(params, outL, outR, numSamples);
-		}))
-	{
-		printf("OpenCL IR test failed\n");
-		return 1;
-	}
-
-	if (!ReverbCLTest::RunRandomBatchSelfTest(
-		[](std::vector<float>& params)
-		{
-			return cpuRef.EvaluateLoss(params);
-		}))
-	{
-		printf("OpenCL DSP test failed\n");
-		return 1;
-	}
-
-	//IRTrainDataGen::GenerateDataset(25);
-	//IROutputFromTxt::Render();
-	//IRLoadFromWav::Load("target_ir.wav", lattopt);
-	for (;;)
-	{
-		lattopt.RunOptimizer(1);
-		float nowloss = lattopt.GetNowLoss();
-		printf("loss:%.5f %s\n", nowloss, nowloss < minLoss ? "(new minloss)" : "");
-		lattopt.GetNowRoomParams(roomParams);
-		IRPlot2D::Draw(roomParams);
-
-		if (nowloss < minLoss)
-		{
-			minLoss = nowloss;
-			IRCheckpoint::Save(roomParams);
-		}
-	}
+	return ReverbCLTest::ReverbCLOptimizer::RunRandomSearchForever(searchConfig) ? 0 : 1;
 }

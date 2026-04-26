@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <string>
@@ -613,5 +614,415 @@ namespace ReverbCLTest
 		}
 
 		return true;
+	}
+
+	namespace ReverbCLOptimizer
+	{
+		constexpr int SampleRate = 48000;
+		constexpr int CheckpointSeconds = 5;
+		constexpr int CheckpointSamples = SampleRate * CheckpointSeconds;
+
+		struct RandomSearchConfig
+		{
+			int numTasks = 10000;
+			int eliteCount = 64;
+			unsigned int seed = 20260426u;
+			float initialRadius = 2.5f;
+			float minRadius = 0.01f;
+			float radiusShrink = 0.985f;
+			float eliteStdScale = 1.5f;
+			float centerBlend = 0.72f;
+			float rawClamp = 12.0f;
+			int checkpointSamples = CheckpointSamples;
+		};
+
+		inline float Soft01(float x, float minv)
+		{
+			float v = 1.0f - std::exp(-std::fabs(x));
+			return v * (1.0f - minv) + minv;
+		}
+
+		inline float TanhNo0(float x, float minv)
+		{
+			float v = std::tanh(x);
+			if (v > 0.0f)
+				v = v * (1.0f - minv) + minv;
+			else
+				v = v * (1.0f - minv) - minv;
+			return v;
+		}
+
+		inline void NormalizeParams(const std::vector<float>& raw, std::vector<float>& normalized)
+		{
+			normalized = raw;
+			normalized.resize(NumParams, 0.0f);
+
+			for (int i = 0; i < NumLayers; ++i)
+			{
+				normalized[i + 0 * NumLayers] = Soft01(normalized[i + 0 * NumLayers], 0.01f);
+				normalized[i + 1 * NumLayers] = Soft01(normalized[i + 1 * NumLayers], 0.01f);
+				normalized[i + 2 * NumLayers] = TanhNo0(normalized[i + 2 * NumLayers], 0.05f) * 0.9f;
+				normalized[i + 3 * NumLayers] = TanhNo0(normalized[i + 3 * NumLayers], 0.05f) * 0.9f;
+				normalized[i + 4 * NumLayers] = Soft01(normalized[i + 4 * NumLayers], 0.9995f) * 0.99999999f;
+				normalized[i + 5 * NumLayers] = Soft01(normalized[i + 5 * NumLayers], 0.9995f) * 0.99999999f;
+				normalized[i + 6 * NumLayers] = Soft01(normalized[i + 6 * NumLayers], 0.01f);
+				normalized[i + 7 * NumLayers] = Soft01(normalized[i + 7 * NumLayers], 0.01f);
+			}
+
+			normalized[8 * NumLayers + 2] = Soft01(normalized[8 * NumLayers + 2], 0.01f);
+			normalized[8 * NumLayers + 3] = Soft01(normalized[8 * NumLayers + 3], 0.01f);
+			normalized[8 * NumLayers + 0] = -Soft01(normalized[8 * NumLayers + 0], 0.65f) * 0.99999999f;
+			normalized[8 * NumLayers + 1] = -Soft01(normalized[8 * NumLayers + 1], 0.65f) * 0.99999999f;
+		}
+
+		inline short FloatToPcm16(float x)
+		{
+			if (x > 1.0f) x = 1.0f;
+			if (x < -1.0f) x = -1.0f;
+			int v = (int)std::lrint(x * 32767.0f);
+			if (v > 32767) v = 32767;
+			if (v < -32768) v = -32768;
+			return (short)v;
+		}
+
+		inline void WriteLE16(FILE* fp, unsigned short v)
+		{
+			unsigned char b[2];
+			b[0] = (unsigned char)(v & 0xFF);
+			b[1] = (unsigned char)((v >> 8) & 0xFF);
+			fwrite(b, 1, 2, fp);
+		}
+
+		inline void WriteLE32(FILE* fp, unsigned int v)
+		{
+			unsigned char b[4];
+			b[0] = (unsigned char)(v & 0xFF);
+			b[1] = (unsigned char)((v >> 8) & 0xFF);
+			b[2] = (unsigned char)((v >> 16) & 0xFF);
+			b[3] = (unsigned char)((v >> 24) & 0xFF);
+			fwrite(b, 1, 4, fp);
+		}
+
+		inline bool SaveWav(const char* filename, const std::vector<float>& irL, const std::vector<float>& irR, int numSamples)
+		{
+			if ((int)irL.size() < numSamples || (int)irR.size() < numSamples)
+				return false;
+
+			FILE* fp = nullptr;
+#if defined(_MSC_VER)
+			if (fopen_s(&fp, filename, "wb") != 0) fp = nullptr;
+#else
+			fp = fopen(filename, "wb");
+#endif
+			if (!fp) return false;
+
+			const unsigned short numChannels = 2;
+			const unsigned short bitsPerSample = 16;
+			const unsigned short blockAlign = (unsigned short)(numChannels * bitsPerSample / 8);
+			const unsigned int byteRate = SampleRate * blockAlign;
+			const unsigned int dataSize = (unsigned int)numSamples * blockAlign;
+			const unsigned int riffSize = 36 + dataSize;
+
+			fwrite("RIFF", 1, 4, fp);
+			WriteLE32(fp, riffSize);
+			fwrite("WAVE", 1, 4, fp);
+
+			fwrite("fmt ", 1, 4, fp);
+			WriteLE32(fp, 16);
+			WriteLE16(fp, 1);
+			WriteLE16(fp, numChannels);
+			WriteLE32(fp, SampleRate);
+			WriteLE32(fp, byteRate);
+			WriteLE16(fp, blockAlign);
+			WriteLE16(fp, bitsPerSample);
+
+			fwrite("data", 1, 4, fp);
+			WriteLE32(fp, dataSize);
+
+			for (int i = 0; i < numSamples; ++i)
+			{
+				WriteLE16(fp, (unsigned short)FloatToPcm16(irL[i]));
+				WriteLE16(fp, (unsigned short)FloatToPcm16(irR[i]));
+			}
+
+			fclose(fp);
+			return true;
+		}
+
+		inline bool SaveParamsTxt(const char* filename, const std::vector<float>& params)
+		{
+			FILE* fp = nullptr;
+#if defined(_MSC_VER)
+			if (fopen_s(&fp, filename, "wb") != 0) fp = nullptr;
+#else
+			fp = fopen(filename, "wb");
+#endif
+			if (!fp) return false;
+
+			fprintf(fp, "NumParams=%zu\n", params.size());
+			for (float v : params)
+				fprintf(fp, "%.9g\n", v);
+
+			fclose(fp);
+			return true;
+		}
+
+		inline bool SaveCheckpoint(LossBatchEvaluator& evaluator, const std::vector<float>& bestRaw, int numSamples)
+		{
+			std::vector<float> normalized;
+			std::vector<float> irL;
+			std::vector<float> irR;
+
+			NormalizeParams(bestRaw, normalized);
+
+			if (!evaluator.RenderIR(bestRaw.data(), 1, numSamples, irL, irR))
+				return false;
+
+			if (!SaveParamsTxt("checkpoint.txt", normalized))
+				return false;
+
+			if (!SaveWav("checkpoint.wav", irL, irR, numSamples))
+				return false;
+
+			return true;
+		}
+
+		inline float AverageRadius(const std::vector<float>& radius)
+		{
+			float sum = 0.0f;
+			for (float v : radius)
+				sum += v;
+			return sum / (float)radius.size();
+		}
+
+		inline void PrintIterationStats(
+			int iter,
+			const std::vector<float>& losses,
+			const std::vector<int>& order,
+			int eliteCount,
+			float bestEver,
+			const std::vector<float>& radius,
+			bool improved)
+		{
+			double mean = 0.0;
+			float minLoss = losses[order.front()];
+			float maxLoss = losses[order.back()];
+			for (float v : losses)
+				mean += (double)v;
+			mean /= (double)losses.size();
+
+			float median = losses[order[losses.size() / 2]];
+			float p10 = losses[order[losses.size() / 10]];
+			float p90 = losses[order[(losses.size() * 9) / 10]];
+
+			double eliteMean = 0.0;
+			for (int i = 0; i < eliteCount; ++i)
+				eliteMean += (double)losses[order[i]];
+			eliteMean /= (double)eliteCount;
+
+			double variance = 0.0;
+			for (float v : losses)
+			{
+				double d = (double)v - mean;
+				variance += d * d;
+			}
+			variance /= (double)losses.size();
+
+			const auto minmaxRadius = std::minmax_element(radius.begin(), radius.end());
+			std::printf(
+				"search %05d loss[min=%.6f p10=%.6f median=%.6f p90=%.6f max=%.6f mean=%.6f std=%.6f eliteMean=%.6f best=%.6f] radius[avg=%.6f min=%.6f max=%.6f]%s\n",
+				iter,
+				minLoss,
+				p10,
+				median,
+				p90,
+				maxLoss,
+				(float)mean,
+				(float)std::sqrt(variance),
+				(float)eliteMean,
+				bestEver,
+				AverageRadius(radius),
+				*minmaxRadius.first,
+				*minmaxRadius.second,
+				improved ? " checkpoint" : "");
+		}
+
+		class RandomSearchOptimizer
+		{
+		private:
+			RandomSearchConfig cfg;
+			LossBatchEvaluator evaluator;
+			std::mt19937 rng;
+			std::normal_distribution<float> normal;
+
+			std::vector<float> center;
+			std::vector<float> radius;
+			std::vector<float> params;
+			std::vector<float> losses;
+			std::vector<float> bestRaw;
+			float bestLoss = std::numeric_limits<float>::infinity();
+			int iteration = 0;
+
+		private:
+			float ClampRaw(float v) const
+			{
+				if (v > cfg.rawClamp) return cfg.rawClamp;
+				if (v < -cfg.rawClamp) return -cfg.rawClamp;
+				return v;
+			}
+
+			void InitializeSearch()
+			{
+				center.assign(NumParams, 0.0f);
+				radius.assign(NumParams, cfg.initialRadius);
+				params.assign((size_t)cfg.numTasks * NumParams, 0.0f);
+				losses.assign(cfg.numTasks, 0.0f);
+				bestRaw.assign(NumParams, 0.0f);
+
+				for (int i = 0; i < NumLayers; ++i)
+				{
+					center[i + 4 * NumLayers] = 2.0f;
+					center[i + 5 * NumLayers] = 2.0f;
+				}
+				center[8 * NumLayers + 0] = 0.5f;
+				center[8 * NumLayers + 1] = 0.5f;
+			}
+
+			void BuildCandidates()
+			{
+				for (int j = 0; j < NumParams; ++j)
+				{
+					params[j] = center[j];
+					if (bestLoss < std::numeric_limits<float>::infinity())
+						params[NumParams + j] = bestRaw[j];
+				}
+
+				const int randomStart = bestLoss < std::numeric_limits<float>::infinity() ? 2 : 1;
+				for (int task = randomStart; task < cfg.numTasks; ++task)
+				{
+					float* dst = params.data() + (size_t)task * NumParams;
+					for (int j = 0; j < NumParams; ++j)
+						dst[j] = ClampRaw(center[j] + normal(rng) * radius[j]);
+				}
+			}
+
+			void UpdateSearchDistribution(const std::vector<int>& order)
+			{
+				std::vector<float> eliteMean(NumParams, 0.0f);
+				std::vector<float> eliteStd(NumParams, 0.0f);
+
+				for (int e = 0; e < cfg.eliteCount; ++e)
+				{
+					const float* src = params.data() + (size_t)order[e] * NumParams;
+					for (int j = 0; j < NumParams; ++j)
+						eliteMean[j] += src[j];
+				}
+				for (float& v : eliteMean)
+					v /= (float)cfg.eliteCount;
+
+				for (int e = 0; e < cfg.eliteCount; ++e)
+				{
+					const float* src = params.data() + (size_t)order[e] * NumParams;
+					for (int j = 0; j < NumParams; ++j)
+					{
+						const float d = src[j] - eliteMean[j];
+						eliteStd[j] += d * d;
+					}
+				}
+
+				for (int j = 0; j < NumParams; ++j)
+				{
+					eliteStd[j] = std::sqrt(eliteStd[j] / (float)(std::max)(1, cfg.eliteCount - 1));
+					center[j] = ClampRaw(center[j] * (1.0f - cfg.centerBlend) + eliteMean[j] * cfg.centerBlend);
+
+					const float targetRadius = (std::max)(cfg.minRadius, eliteStd[j] * cfg.eliteStdScale);
+					const float shrinkRadius = (std::max)(cfg.minRadius, radius[j] * cfg.radiusShrink);
+					radius[j] = (std::max)(cfg.minRadius, (std::min)(shrinkRadius, targetRadius));
+				}
+			}
+
+			bool SaveBestCheckpoint()
+			{
+				if (!SaveCheckpoint(evaluator, bestRaw, cfg.checkpointSamples))
+				{
+					std::printf("ReverbCLOptimizer: failed to write checkpoint.txt/checkpoint.wav\n");
+					return false;
+				}
+
+				std::printf("ReverbCLOptimizer: saved checkpoint loss=%.9g\n", bestLoss);
+				return true;
+			}
+
+		public:
+			explicit RandomSearchOptimizer(RandomSearchConfig config = RandomSearchConfig())
+				: cfg(config), rng(config.seed), normal(0.0f, 1.0f)
+			{
+				if (cfg.numTasks < 2)
+					cfg.numTasks = 2;
+				if (cfg.eliteCount < 2)
+					cfg.eliteCount = 2;
+				if (cfg.eliteCount > cfg.numTasks)
+					cfg.eliteCount = cfg.numTasks;
+				InitializeSearch();
+			}
+
+			bool Step()
+			{
+				BuildCandidates();
+
+				if (!evaluator.Evaluate(params.data(), cfg.numTasks, losses))
+					return false;
+
+				for (float& loss : losses)
+				{
+					if (!std::isfinite(loss))
+						loss = std::numeric_limits<float>::infinity();
+				}
+
+				std::vector<int> order(cfg.numTasks);
+				for (int i = 0; i < cfg.numTasks; ++i)
+					order[i] = i;
+				std::sort(order.begin(), order.end(),
+					[this](int a, int b)
+					{
+						return losses[a] < losses[b];
+					});
+
+				const int bestIndex = order.front();
+				const float iterBest = losses[bestIndex];
+				bool improved = false;
+
+				if (std::isfinite(iterBest) && iterBest < bestLoss)
+				{
+					bestLoss = iterBest;
+					bestRaw.assign(
+						params.begin() + (size_t)bestIndex * NumParams,
+						params.begin() + (size_t)(bestIndex + 1) * NumParams);
+					center = bestRaw;
+					improved = true;
+					if (!SaveBestCheckpoint())
+						return false;
+				}
+
+				UpdateSearchDistribution(order);
+				PrintIterationStats(iteration, losses, order, cfg.eliteCount, bestLoss, radius, improved);
+				++iteration;
+				return true;
+			}
+
+			bool RunForever()
+			{
+				while (Step())
+				{
+				}
+				return false;
+			}
+		};
+
+		inline bool RunRandomSearchForever(RandomSearchConfig config = RandomSearchConfig())
+		{
+			RandomSearchOptimizer optimizer(config);
+			return optimizer.RunForever();
+		}
 	}
 }
