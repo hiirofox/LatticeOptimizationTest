@@ -30,6 +30,13 @@
 
 #define LR_PI 3.1415926535897932384626f
 
+// Training-time ReverbParams. Optimization still only searches RoomParams.
+// Checkpoint export can use a different CPU-side ReverbParams path.
+#define LR_TRAIN_ROOM_SIZE 1200.0f
+#define LR_TRAIN_DECAY_TIME 0.95f
+#define LR_TRAIN_DIFFUSION 1.0f
+#define LR_TRAIN_MIX_TAP_DIRECT 0.95f
+
 typedef struct DelayLineCL
 {
 	__global float* dat;
@@ -61,6 +68,24 @@ typedef struct LatticeReverbCL
 	float fbdr;
 	float mixTapDirect;
 } LatticeReverbCL;
+
+typedef struct ReverbParamsCL
+{
+	float roomSize;
+	float decayTime;
+	float diffusion;
+	float mixTapDirect;
+} ReverbParamsCL;
+
+static ReverbParamsCL lr_training_reverb_params()
+{
+	ReverbParamsCL p;
+	p.roomSize = LR_TRAIN_ROOM_SIZE;
+	p.decayTime = LR_TRAIN_DECAY_TIME;
+	p.diffusion = LR_TRAIN_DIFFUSION;
+	p.mixTapDirect = LR_TRAIN_MIX_TAP_DIRECT;
+	return p;
+}
 
 static float lr_soft01(float x, float minv)
 {
@@ -187,7 +212,8 @@ static void lr_delay_write(DelayLineCL* d, float val)
 
 static void lr_cascade_bind(LatticeCascadeCL* c, __global float* taskScratch, int lineBase)
 {
-	c->roomSize = 512.0f;
+	ReverbParamsCL reverbParams = lr_training_reverb_params();
+	c->roomSize = reverbParams.roomSize;
 	c->tapmix = 0.0f;
 	for (int i = 0; i < LR_NUM_LAYERS; ++i)
 	{
@@ -256,13 +282,16 @@ static float lr_cascade_process_sample(LatticeCascadeCL* c, float x)
 
 static void lr_reverb_bind(LatticeReverbCL* r, __global float* taskScratch)
 {
+	ReverbParamsCL reverbParams = lr_training_reverb_params();
 	lr_cascade_bind(&r->latl, taskScratch, LR_LINE_LATL0);
 	lr_cascade_bind(&r->latr, taskScratch, LR_LINE_LATR0);
 	lr_delay_bind(&r->crossDelayL, taskScratch + LR_LINE_CROSS_L * LR_MAX_DELAY);
 	lr_delay_bind(&r->crossDelayR, taskScratch + LR_LINE_CROSS_R * LR_MAX_DELAY);
 	r->fbdl = 0.0f;
 	r->fbdr = 0.0f;
-	r->mixTapDirect = 0.2f;
+	r->latl.roomSize = reverbParams.roomSize;
+	r->latr.roomSize = reverbParams.roomSize;
+	r->mixTapDirect = reverbParams.mixTapDirect;
 }
 
 static void lr_reverb_reset(LatticeReverbCL* r)
@@ -275,6 +304,7 @@ static void lr_reverb_reset(LatticeReverbCL* r)
 
 static void lr_reverb_setup(LatticeReverbCL* r, float rp[LR_NUM_PARAMS])
 {
+	ReverbParamsCL reverbParams = lr_training_reverb_params();
 	float tsl[LR_NUM_LAYERS];
 	float tsr[LR_NUM_LAYERS];
 	float ksl[LR_NUM_LAYERS];
@@ -290,27 +320,25 @@ static void lr_reverb_setup(LatticeReverbCL* r, float rp[LR_NUM_PARAMS])
 		tsr[i] = rp[i + 1 * LR_NUM_LAYERS];
 		ksl[i] = rp[i + 2 * LR_NUM_LAYERS];
 		ksr[i] = rp[i + 3 * LR_NUM_LAYERS];
-		dsl[i] = rp[i + 4 * LR_NUM_LAYERS] * 0.9999f;
-		dsr[i] = rp[i + 5 * LR_NUM_LAYERS] * 0.9999f;
+		dsl[i] = rp[i + 4 * LR_NUM_LAYERS] * reverbParams.decayTime;
+		dsr[i] = rp[i + 5 * LR_NUM_LAYERS] * reverbParams.decayTime;
 		outksl[i] = rp[i + 6 * LR_NUM_LAYERS];
 		outksr[i] = rp[i + 7 * LR_NUM_LAYERS];
 	}
 
-	r->latl.roomSize = 600.0f;
-	r->latr.roomSize = 600.0f;
 	lr_cascade_set_delays_length(&r->latl, tsl);
 	lr_cascade_set_delays_length(&r->latr, tsr);
 
 	for (int i = 0; i < LR_NUM_LAYERS; ++i)
 	{
-		r->latl.ks[i] = ksl[i];
-		r->latr.ks[i] = ksr[i];
+		r->latl.ks[i] = ksl[i] * reverbParams.diffusion;
+		r->latr.ks[i] = ksr[i] * reverbParams.diffusion;
 		r->latl.ds[i] = dsl[i];
 		r->latr.ds[i] = dsr[i];
 	}
 
-	r->fbdl = rp[8 * LR_NUM_LAYERS + 0] * 0.9999f;
-	r->fbdr = rp[8 * LR_NUM_LAYERS + 1] * 0.9999f;
+	r->fbdl = rp[8 * LR_NUM_LAYERS + 0] * reverbParams.decayTime;
+	r->fbdr = rp[8 * LR_NUM_LAYERS + 1] * reverbParams.decayTime;
 	lr_delay_set_delay_time(&r->crossDelayL, rp[8 * LR_NUM_LAYERS + 2] * r->latl.roomSize);
 	lr_delay_set_delay_time(&r->crossDelayR, rp[8 * LR_NUM_LAYERS + 3] * r->latr.roomSize);
 

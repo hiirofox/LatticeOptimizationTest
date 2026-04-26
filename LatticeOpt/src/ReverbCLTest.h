@@ -656,6 +656,7 @@ namespace ReverbCLTest
 		constexpr int SampleRate = 48000;
 		constexpr int CheckpointSeconds = 5;
 		constexpr int CheckpointSamples = SampleRate * CheckpointSeconds;
+		using CheckpointWriter = bool (*)(const std::vector<float>& normalizedRoomParams);
 
 		struct RandomSearchConfig
 		{
@@ -669,6 +670,7 @@ namespace ReverbCLTest
 			float centerBlend = 0.72f;
 			float rawClamp = 12.0f;
 			int checkpointSamples = CheckpointSamples;
+			CheckpointWriter checkpointWriter = nullptr;
 		};
 
 		inline float Soft01(float x, float minv)
@@ -978,6 +980,20 @@ namespace ReverbCLTest
 
 			bool SaveBestCheckpoint()
 			{
+				if (cfg.checkpointWriter)
+				{
+					std::vector<float> normalized;
+					NormalizeParams(bestRaw, normalized);
+					if (!cfg.checkpointWriter(normalized))
+					{
+						std::printf("ReverbCLOptimizer: failed to write checkpoint.txt/checkpoint.wav\n");
+						return false;
+					}
+
+					std::printf("ReverbCLOptimizer: saved checkpoint loss=%.9g\n", bestLoss);
+					return true;
+				}
+
 				if (!SaveCheckpoint(evaluator, bestRaw, cfg.checkpointSamples))
 				{
 					std::printf("ReverbCLOptimizer: failed to write checkpoint.txt/checkpoint.wav\n");
@@ -1071,6 +1087,7 @@ namespace ReverbCLTest
 			float rawClamp = 12.0f;
 			int checkpointSamples = CheckpointSamples;
 			int eigenUpdateEvery = 1;
+			CheckpointWriter checkpointWriter = nullptr;
 		};
 
 		class CMAOptimizer
@@ -1317,6 +1334,20 @@ namespace ReverbCLTest
 
 			bool SaveBestCheckpoint()
 			{
+				if (cfg.checkpointWriter)
+				{
+					std::vector<float> normalized;
+					NormalizeParams(bestRaw, normalized);
+					if (!cfg.checkpointWriter(normalized))
+					{
+						std::printf("CMAOptimizer: failed to write checkpoint.txt/checkpoint.wav\n");
+						return false;
+					}
+
+					std::printf("CMAOptimizer: saved checkpoint loss=%.9g\n", bestLoss);
+					return true;
+				}
+
 				if (!SaveCheckpoint(evaluator, bestRaw, cfg.checkpointSamples))
 				{
 					std::printf("CMAOptimizer: failed to write checkpoint.txt/checkpoint.wav\n");

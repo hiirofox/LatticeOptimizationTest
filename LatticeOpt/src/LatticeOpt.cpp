@@ -1932,6 +1932,11 @@ int main()
 	searchConfig.minSigma = 0.001f;
 	searchConfig.maxSigma = 12.0f;
 	searchConfig.eigenUpdateEvery = 1;
+	searchConfig.checkpointWriter = [](const std::vector<float>& normalizedRoomParams)
+	{
+		std::vector<float> cpuRoomParams = normalizedRoomParams;
+		return IRCheckpoint::Save(cpuRoomParams);
+	};
 
 	return ReverbCLTest::ReverbCLOptimizer::RunCMAForever(searchConfig) ? 0 : 1;
 }
