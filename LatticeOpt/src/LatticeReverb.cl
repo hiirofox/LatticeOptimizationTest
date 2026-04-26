@@ -3,7 +3,7 @@
 
 #define LR_NUM_LAYERS 6
 #define LR_NUM_PARAMS 52
-#define LR_TEST_BLOCK_SIZE (65536)
+#define LR_TEST_BLOCK_SIZE (65536*2)
 #define LR_AUTO_FFT_SIZE (LR_TEST_BLOCK_SIZE*2)
 #define LR_MAX_DELAY 8192
 #define LR_DELAY_LINES 14
@@ -32,8 +32,8 @@
 
 // Training-time ReverbParams. Optimization still only searches RoomParams.
 // Checkpoint export can use a different CPU-side ReverbParams path.
-#define LR_TRAIN_ROOM_SIZE 1200.0f
-#define LR_TRAIN_DECAY_TIME 0.95f
+#define LR_TRAIN_ROOM_SIZE 120.0f
+#define LR_TRAIN_DECAY_TIME 0.999f
 #define LR_TRAIN_DIFFUSION 1.0f
 #define LR_TRAIN_MIX_TAP_DIRECT 0.95f
 
@@ -85,45 +85,6 @@ static ReverbParamsCL lr_training_reverb_params()
 	p.diffusion = LR_TRAIN_DIFFUSION;
 	p.mixTapDirect = LR_TRAIN_MIX_TAP_DIRECT;
 	return p;
-}
-
-static float lr_soft01(float x, float minv)
-{
-	float v = 1.0f - exp(-fabs(x));
-	return v * (1.0f - minv) + minv;
-}
-
-static float lr_tanhfno0(float x, float minv)
-{
-	float v = tanh(x);
-	if (v > 0.0f)
-		v = v * (1.0f - minv) + minv;
-	else
-		v = v * (1.0f - minv) - minv;
-	return v;
-}
-
-static void lr_regularize(const __global float* raw, float rp[LR_NUM_PARAMS])
-{
-	for (int i = 0; i < LR_NUM_PARAMS; ++i)
-		rp[i] = raw[i];
-
-	for (int i = 0; i < LR_NUM_LAYERS; ++i)
-	{
-		rp[i + 0 * LR_NUM_LAYERS] = lr_soft01(rp[i + 0 * LR_NUM_LAYERS], 0.01f);
-		rp[i + 1 * LR_NUM_LAYERS] = lr_soft01(rp[i + 1 * LR_NUM_LAYERS], 0.01f);
-		rp[i + 2 * LR_NUM_LAYERS] = lr_tanhfno0(rp[i + 2 * LR_NUM_LAYERS], 0.05f) * 0.9f;
-		rp[i + 3 * LR_NUM_LAYERS] = lr_tanhfno0(rp[i + 3 * LR_NUM_LAYERS], 0.05f) * 0.9f;
-		rp[i + 4 * LR_NUM_LAYERS] = lr_soft01(rp[i + 4 * LR_NUM_LAYERS], 0.9995f) * 0.99999999f;
-		rp[i + 5 * LR_NUM_LAYERS] = lr_soft01(rp[i + 5 * LR_NUM_LAYERS], 0.9995f) * 0.99999999f;
-		rp[i + 6 * LR_NUM_LAYERS] = lr_soft01(rp[i + 6 * LR_NUM_LAYERS], 0.01f);
-		rp[i + 7 * LR_NUM_LAYERS] = lr_soft01(rp[i + 7 * LR_NUM_LAYERS], 0.01f);
-	}
-
-	rp[8 * LR_NUM_LAYERS + 2] = lr_soft01(rp[8 * LR_NUM_LAYERS + 2], 0.01f);
-	rp[8 * LR_NUM_LAYERS + 3] = lr_soft01(rp[8 * LR_NUM_LAYERS + 3], 0.01f);
-	rp[8 * LR_NUM_LAYERS + 0] = -lr_soft01(rp[8 * LR_NUM_LAYERS + 0], 0.65f) * 0.99999999f;
-	rp[8 * LR_NUM_LAYERS + 1] = -lr_soft01(rp[8 * LR_NUM_LAYERS + 1], 0.65f) * 0.99999999f;
 }
 
 static void lr_delay_bind(DelayLineCL* d, __global float* base)
@@ -428,7 +389,7 @@ static void lr_fft(__global float* re, __global float* im, int n, int inv)
 	}
 }
 
-static float lr_eval_loss_one(const __global float* rawParams, __global float* taskScratch)
+static float lr_eval_loss_one(const __global float* normalizedParams, __global float* taskScratch)
 {
 	float rp[LR_NUM_PARAMS];
 	__global float* delayScratch = taskScratch;
@@ -447,7 +408,8 @@ static float lr_eval_loss_one(const __global float* rawParams, __global float* t
 	__global float* gdr = lossScratch + LR_SCRATCH_GDR;
 	LatticeReverbCL reverb;
 
-	lr_regularize(rawParams, rp);
+	for (int i = 0; i < LR_NUM_PARAMS; ++i)
+		rp[i] = normalizedParams[i];
 	lr_reverb_bind(&reverb, delayScratch);
 	lr_reverb_setup(&reverb, rp);
 
@@ -594,7 +556,7 @@ static float lr_eval_loss_one(const __global float* rawParams, __global float* t
 	float diffloss = avgl - avgr;
 	float maxminloss = specmax - specmin;
 	float gdloss = 1.0f / (fmin(gds2l, gds2r) + 0.1f);
-	float maxcorrloss = log(maxcorrl + maxcorrr + fmax(maxcorrl, maxcorrr) * 4.0f) + 80.0f;
+	float maxcorrloss = maxcorrl + maxcorrr + fmax(maxcorrl, maxcorrr) * 4.0f;
 	diffloss = diffloss * diffloss * 100000.0f;
 	maxminloss = maxminloss * maxminloss * 1.0f;
 	gdloss = 1000.0f / (gdloss + 1e-20f);
@@ -641,7 +603,8 @@ __kernel void RenderLatticeIRBatch(
 	float rp[LR_NUM_PARAMS];
 	LatticeReverbCL reverb;
 
-	lr_regularize(taskParams, rp);
+	for (int i = 0; i < LR_NUM_PARAMS; ++i)
+		rp[i] = taskParams[i];
 	lr_reverb_bind(&reverb, taskScratch);
 	lr_reverb_setup(&reverb, rp);
 

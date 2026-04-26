@@ -96,6 +96,66 @@ namespace ReverbCLTest
 		return "OTHER";
 	}
 
+	inline float Soft01(float x, float minv)
+	{
+		float v = 1.0f - std::exp(-std::fabs(x));
+		return v * (1.0f - minv) + minv;
+	}
+
+	inline float TanhNo0(float x, float minv)
+	{
+		float v = std::tanh(x);
+		if (v > 0.0f)
+			v = v * (1.0f - minv) + minv;
+		else
+			v = v * (1.0f - minv) - minv;
+		return v;
+	}
+
+	inline void NormalizeRoomParams(const float* raw, float* normalized)
+	{
+		for (int i = 0; i < NumParams; ++i)
+			normalized[i] = raw[i];
+
+		for (int i = 0; i < NumLayers; ++i)
+		{
+			float x = (float)i / NumLayers;
+			normalized[i + 0 * NumLayers] = (x + Soft01(normalized[i + 0 * NumLayers], 0.01f) / NumLayers);//ts
+			normalized[i + 1 * NumLayers] = (x + Soft01(normalized[i + 1 * NumLayers], 0.01f) / NumLayers);
+			normalized[i + 0 * NumLayers] = powf(normalized[i + 0 * NumLayers], 1.5);
+			normalized[i + 1 * NumLayers] = powf(normalized[i + 1 * NumLayers], 1.5);
+
+			normalized[i + 2 * NumLayers] = TanhNo0(normalized[i + 2 * NumLayers], 0.05f) * 0.9f;//ks
+			normalized[i + 3 * NumLayers] = TanhNo0(normalized[i + 3 * NumLayers], 0.05f) * 0.9f;
+			normalized[i + 4 * NumLayers] = Soft01(normalized[i + 4 * NumLayers], 0.9995f) * 0.99999999f;//ds
+			normalized[i + 5 * NumLayers] = Soft01(normalized[i + 5 * NumLayers], 0.9995f) * 0.99999999f;
+			normalized[i + 6 * NumLayers] = Soft01(normalized[i + 6 * NumLayers], 0.01f);//outks
+			normalized[i + 7 * NumLayers] = Soft01(normalized[i + 7 * NumLayers], 0.01f);
+		}
+
+		normalized[8 * NumLayers + 2] = Soft01(normalized[8 * NumLayers + 2], 0.01f);//fbt
+		normalized[8 * NumLayers + 3] = Soft01(normalized[8 * NumLayers + 3], 0.01f);
+		normalized[8 * NumLayers + 0] = -Soft01(normalized[8 * NumLayers + 0], 0.75f) * 0.99999999f;//fbd
+		normalized[8 * NumLayers + 1] = -Soft01(normalized[8 * NumLayers + 1], 0.75f) * 0.99999999f;
+	}
+
+	inline void NormalizeRoomParamVector(const std::vector<float>& raw, std::vector<float>& normalized)
+	{
+		normalized.resize(NumParams, 0.0f);
+		NormalizeRoomParams(raw.data(), normalized.data());
+	}
+
+	inline void NormalizeRoomParamBatch(const std::vector<float>& raw, int numTasks, std::vector<float>& normalized)
+	{
+		normalized.assign((size_t)numTasks * NumParams, 0.0f);
+		for (int task = 0; task < numTasks; ++task)
+		{
+			NormalizeRoomParams(
+				raw.data() + (size_t)task * NumParams,
+				normalized.data() + (size_t)task * NumParams);
+		}
+	}
+
 	class LossBatchEvaluator
 	{
 	private:
@@ -478,8 +538,11 @@ namespace ReverbCLTest
 			return false;
 		}
 
+		std::vector<float> normalizedParams;
+		NormalizeRoomParamBatch(params, numTasks, normalizedParams);
+
 		LossBatchEvaluator evaluator;
-		return evaluator.Evaluate(params.data(), numTasks, losses);
+		return evaluator.Evaluate(normalizedParams.data(), numTasks, losses);
 	}
 
 	template<typename CpuRenderFunc>
@@ -492,10 +555,12 @@ namespace ReverbCLTest
 		std::vector<float> params;
 		std::vector<float> gpuL;
 		std::vector<float> gpuR;
+		std::vector<float> normalizedParams;
 		MakeRandomParams(params, numTasks);
+		NormalizeRoomParamBatch(params, numTasks, normalizedParams);
 
 		LossBatchEvaluator evaluator;
-		if (!evaluator.RenderIR(params.data(), numTasks, numSamples, gpuL, gpuR))
+		if (!evaluator.RenderIR(normalizedParams.data(), numTasks, numSamples, gpuL, gpuR))
 			return false;
 
 		float globalMaxAbs = 0.0f;
@@ -586,11 +651,13 @@ namespace ReverbCLTest
 		constexpr float RelTolerance = 2e-4f;
 
 		std::vector<float> params;
+		std::vector<float> normalizedParams;
 		std::vector<float> losses;
 		MakeRandomParams(params, numTasks);
+		NormalizeRoomParamBatch(params, numTasks, normalizedParams);
 
 		LossBatchEvaluator evaluator;
-		if (!evaluator.Evaluate(params.data(), numTasks, losses))
+		if (!evaluator.Evaluate(normalizedParams.data(), numTasks, losses))
 			return false;
 
 		float maxAbsDiff = 0.0f;
@@ -656,7 +723,8 @@ namespace ReverbCLTest
 		constexpr int SampleRate = 48000;
 		constexpr int CheckpointSeconds = 5;
 		constexpr int CheckpointSamples = SampleRate * CheckpointSeconds;
-		using CheckpointWriter = bool (*)(const std::vector<float>& normalizedRoomParams);
+		constexpr int NumCheckpointSlots = 10;
+		using CheckpointWriter = bool (*)(int checkpointIndex, const std::vector<float>& normalizedRoomParams);
 
 		struct RandomSearchConfig
 		{
@@ -673,43 +741,171 @@ namespace ReverbCLTest
 			CheckpointWriter checkpointWriter = nullptr;
 		};
 
+		struct CheckpointUpdate
+		{
+			int slot = 0;
+			float oldLoss = std::numeric_limits<float>::infinity();
+			float newLoss = std::numeric_limits<float>::infinity();
+		};
+
+		struct CheckpointRecord
+		{
+			float loss = std::numeric_limits<float>::infinity();
+			std::vector<float> raw;
+		};
+
+		class CheckpointArchive
+		{
+		private:
+			std::vector<CheckpointRecord> records;
+
+		private:
+			static bool SameRaw(const std::vector<float>& a, const std::vector<float>& b)
+			{
+				if (a.size() != b.size())
+					return false;
+
+				for (size_t i = 0; i < a.size(); ++i)
+				{
+					if (std::fabs(a[i] - b[i]) > 1.0e-6f)
+						return false;
+				}
+				return true;
+			}
+
+			static bool ContainsSameRaw(const std::vector<CheckpointRecord>& selected, const std::vector<float>& raw)
+			{
+				for (const CheckpointRecord& record : selected)
+				{
+					if (SameRaw(record.raw, raw))
+						return true;
+				}
+				return false;
+			}
+
+		public:
+			CheckpointArchive()
+			{
+				records.resize(NumCheckpointSlots);
+				for (CheckpointRecord& record : records)
+					record.raw.assign(NumParams, 0.0f);
+			}
+
+			bool HasBest() const
+			{
+				return !records.empty() && std::isfinite(records[0].loss);
+			}
+
+			float BestLoss() const
+			{
+				return records.empty() ? std::numeric_limits<float>::infinity() : records[0].loss;
+			}
+
+			const std::vector<float>& BestRaw() const
+			{
+				return records[0].raw;
+			}
+
+			const std::vector<float>& RawAt(int slot) const
+			{
+				return records[slot].raw;
+			}
+
+			void UpdateFromBatch(
+				const std::vector<float>& params,
+				const std::vector<float>& losses,
+				const std::vector<int>& order,
+				std::vector<CheckpointUpdate>& updates,
+				std::vector<int>& changedSlots)
+			{
+				std::vector<CheckpointRecord> pool;
+				for (const CheckpointRecord& record : records)
+				{
+					if (std::isfinite(record.loss))
+						pool.push_back(record);
+				}
+
+				std::vector<CheckpointRecord> currentRecords;
+				currentRecords.reserve(NumCheckpointSlots);
+				for (int i = 0; i < (int)order.size(); ++i)
+				{
+					const int task = order[i];
+					const float loss = losses[task];
+					if (!std::isfinite(loss))
+						continue;
+
+					CheckpointRecord record;
+					record.loss = loss;
+					record.raw.assign(
+						params.begin() + (size_t)task * NumParams,
+						params.begin() + (size_t)(task + 1) * NumParams);
+
+					if (ContainsSameRaw(currentRecords, record.raw))
+						continue;
+
+					currentRecords.push_back(record);
+					pool.push_back(record);
+					if ((int)currentRecords.size() >= NumCheckpointSlots)
+						break;
+				}
+
+				std::sort(pool.begin(), pool.end(),
+					[](const CheckpointRecord& a, const CheckpointRecord& b)
+					{
+						return a.loss < b.loss;
+					});
+
+				std::vector<CheckpointRecord> next;
+				next.reserve(NumCheckpointSlots);
+				for (const CheckpointRecord& record : pool)
+				{
+					if (ContainsSameRaw(next, record.raw))
+						continue;
+
+					next.push_back(record);
+					if ((int)next.size() >= NumCheckpointSlots)
+						break;
+				}
+
+				while ((int)next.size() < NumCheckpointSlots)
+				{
+					CheckpointRecord empty;
+					empty.raw.assign(NumParams, 0.0f);
+					next.push_back(empty);
+				}
+
+				for (int i = 0; i < NumCheckpointSlots; ++i)
+				{
+					const bool improvedLoss = next[i].loss < records[i].loss - 1.0e-7f;
+					const bool filledEmpty = !std::isfinite(records[i].loss) && std::isfinite(next[i].loss);
+					if (improvedLoss || filledEmpty)
+					{
+						CheckpointUpdate update;
+						update.slot = i;
+						update.oldLoss = records[i].loss;
+						update.newLoss = next[i].loss;
+						updates.push_back(update);
+						changedSlots.push_back(i);
+					}
+				}
+
+				records.swap(next);
+			}
+		};
+
 		inline float Soft01(float x, float minv)
 		{
-			float v = 1.0f - std::exp(-std::fabs(x));
-			return v * (1.0f - minv) + minv;
+			return Soft01(x, minv);
 		}
 
 		inline float TanhNo0(float x, float minv)
 		{
-			float v = std::tanh(x);
-			if (v > 0.0f)
-				v = v * (1.0f - minv) + minv;
-			else
-				v = v * (1.0f - minv) - minv;
-			return v;
+			return TanhNo0(x, minv);
 		}
 
 		inline void NormalizeParams(const std::vector<float>& raw, std::vector<float>& normalized)
 		{
-			normalized = raw;
-			normalized.resize(NumParams, 0.0f);
-
-			for (int i = 0; i < NumLayers; ++i)
-			{
-				normalized[i + 0 * NumLayers] = Soft01(normalized[i + 0 * NumLayers], 0.01f);
-				normalized[i + 1 * NumLayers] = Soft01(normalized[i + 1 * NumLayers], 0.01f);
-				normalized[i + 2 * NumLayers] = TanhNo0(normalized[i + 2 * NumLayers], 0.05f) * 0.9f;
-				normalized[i + 3 * NumLayers] = TanhNo0(normalized[i + 3 * NumLayers], 0.05f) * 0.9f;
-				normalized[i + 4 * NumLayers] = Soft01(normalized[i + 4 * NumLayers], 0.9995f) * 0.99999999f;
-				normalized[i + 5 * NumLayers] = Soft01(normalized[i + 5 * NumLayers], 0.9995f) * 0.99999999f;
-				normalized[i + 6 * NumLayers] = Soft01(normalized[i + 6 * NumLayers], 0.01f);
-				normalized[i + 7 * NumLayers] = Soft01(normalized[i + 7 * NumLayers], 0.01f);
-			}
-
-			normalized[8 * NumLayers + 2] = Soft01(normalized[8 * NumLayers + 2], 0.01f);
-			normalized[8 * NumLayers + 3] = Soft01(normalized[8 * NumLayers + 3], 0.01f);
-			normalized[8 * NumLayers + 0] = -Soft01(normalized[8 * NumLayers + 0], 0.65f) * 0.99999999f;
-			normalized[8 * NumLayers + 1] = -Soft01(normalized[8 * NumLayers + 1], 0.65f) * 0.99999999f;
+			NormalizeRoomParamVector(raw, normalized);
 		}
 
 		inline short FloatToPcm16(float x)
@@ -812,7 +1008,7 @@ namespace ReverbCLTest
 
 			NormalizeParams(bestRaw, normalized);
 
-			if (!evaluator.RenderIR(bestRaw.data(), 1, numSamples, irL, irR))
+			if (!evaluator.RenderIR(normalized.data(), 1, numSamples, irL, irR))
 				return false;
 
 			if (!SaveParamsTxt("checkpoint.txt", normalized))
@@ -832,56 +1028,29 @@ namespace ReverbCLTest
 			return sum / (float)radius.size();
 		}
 
-		inline void PrintIterationStats(
-			int iter,
-			const std::vector<float>& losses,
-			const std::vector<int>& order,
-			int eliteCount,
-			float bestEver,
-			const std::vector<float>& radius,
-			bool improved)
+		inline void PrintIterationStats(int iter, float iterLoss, float bestEver)
 		{
-			double mean = 0.0;
-			float minLoss = losses[order.front()];
-			float maxLoss = losses[order.back()];
-			for (float v : losses)
-				mean += (double)v;
-			mean /= (double)losses.size();
+			std::printf("search %05d loss=%.6f min=%.6f\n", iter, iterLoss, bestEver);
+		}
 
-			float median = losses[order[losses.size() / 2]];
-			float p10 = losses[order[losses.size() / 10]];
-			float p90 = losses[order[(losses.size() * 9) / 10]];
-
-			double eliteMean = 0.0;
-			for (int i = 0; i < eliteCount; ++i)
-				eliteMean += (double)losses[order[i]];
-			eliteMean /= (double)eliteCount;
-
-			double variance = 0.0;
-			for (float v : losses)
+		inline void PrintCheckpointUpdates(const std::vector<CheckpointUpdate>& updates)
+		{
+			for (const CheckpointUpdate& update : updates)
 			{
-				double d = (double)v - mean;
-				variance += d * d;
+				if (std::isfinite(update.oldLoss))
+				{
+					std::printf("checkpoint%d (%.4f->%.4f)\n",
+						update.slot + 1,
+						update.oldLoss,
+						update.newLoss);
+				}
+				else
+				{
+					std::printf("checkpoint%d (empty->%.4f)\n",
+						update.slot + 1,
+						update.newLoss);
+				}
 			}
-			variance /= (double)losses.size();
-
-			const auto minmaxRadius = std::minmax_element(radius.begin(), radius.end());
-			std::printf(
-				"search %05d loss[min=%.6f p10=%.6f median=%.6f p90=%.6f max=%.6f mean=%.6f std=%.6f eliteMean=%.6f best=%.6f] radius[avg=%.6f min=%.6f max=%.6f]%s\n",
-				iter,
-				minLoss,
-				p10,
-				median,
-				p90,
-				maxLoss,
-				(float)mean,
-				(float)std::sqrt(variance),
-				(float)eliteMean,
-				bestEver,
-				AverageRadius(radius),
-				*minmaxRadius.first,
-				*minmaxRadius.second,
-				improved ? " checkpoint" : "");
 		}
 
 		class RandomSearchOptimizer
@@ -895,8 +1064,10 @@ namespace ReverbCLTest
 			std::vector<float> center;
 			std::vector<float> radius;
 			std::vector<float> params;
+			std::vector<float> evalParams;
 			std::vector<float> losses;
 			std::vector<float> bestRaw;
+			CheckpointArchive checkpointArchive;
 			float bestLoss = std::numeric_limits<float>::infinity();
 			int iteration = 0;
 
@@ -913,6 +1084,7 @@ namespace ReverbCLTest
 				center.assign(NumParams, 0.0f);
 				radius.assign(NumParams, cfg.initialRadius);
 				params.assign((size_t)cfg.numTasks * NumParams, 0.0f);
+				evalParams.assign((size_t)cfg.numTasks * NumParams, 0.0f);
 				losses.assign(cfg.numTasks, 0.0f);
 				bestRaw.assign(NumParams, 0.0f);
 
@@ -941,6 +1113,11 @@ namespace ReverbCLTest
 					for (int j = 0; j < NumParams; ++j)
 						dst[j] = ClampRaw(center[j] + normal(rng) * radius[j]);
 				}
+			}
+
+			void BuildEvalParams()
+			{
+				NormalizeRoomParamBatch(params, cfg.numTasks, evalParams);
 			}
 
 			void UpdateSearchDistribution(const std::vector<int>& order)
@@ -978,29 +1155,46 @@ namespace ReverbCLTest
 				}
 			}
 
-			bool SaveBestCheckpoint()
+			bool SaveCheckpointSlot(int slot, const std::vector<float>& raw)
 			{
 				if (cfg.checkpointWriter)
 				{
 					std::vector<float> normalized;
-					NormalizeParams(bestRaw, normalized);
-					if (!cfg.checkpointWriter(normalized))
+					NormalizeParams(raw, normalized);
+					if (!cfg.checkpointWriter(slot + 1, normalized))
 					{
 						std::printf("ReverbCLOptimizer: failed to write checkpoint.txt/checkpoint.wav\n");
 						return false;
 					}
-
-					std::printf("ReverbCLOptimizer: saved checkpoint loss=%.9g\n", bestLoss);
 					return true;
 				}
 
-				if (!SaveCheckpoint(evaluator, bestRaw, cfg.checkpointSamples))
+				if (!SaveCheckpoint(evaluator, raw, cfg.checkpointSamples))
 				{
 					std::printf("ReverbCLOptimizer: failed to write checkpoint.txt/checkpoint.wav\n");
 					return false;
 				}
 
-				std::printf("ReverbCLOptimizer: saved checkpoint loss=%.9g\n", bestLoss);
+				return true;
+			}
+
+			bool UpdateCheckpoints(const std::vector<int>& order, std::vector<CheckpointUpdate>& updates)
+			{
+				std::vector<int> changedSlots;
+				checkpointArchive.UpdateFromBatch(params, losses, order, updates, changedSlots);
+
+				if (checkpointArchive.HasBest())
+				{
+					bestLoss = checkpointArchive.BestLoss();
+					bestRaw = checkpointArchive.BestRaw();
+				}
+
+				for (int slot : changedSlots)
+				{
+					if (!SaveCheckpointSlot(slot, checkpointArchive.RawAt(slot)))
+						return false;
+				}
+
 				return true;
 			}
 
@@ -1020,8 +1214,9 @@ namespace ReverbCLTest
 			bool Step()
 			{
 				BuildCandidates();
+				BuildEvalParams();
 
-				if (!evaluator.Evaluate(params.data(), cfg.numTasks, losses))
+				if (!evaluator.Evaluate(evalParams.data(), cfg.numTasks, losses))
 					return false;
 
 				for (float& loss : losses)
@@ -1041,22 +1236,17 @@ namespace ReverbCLTest
 
 				const int bestIndex = order.front();
 				const float iterBest = losses[bestIndex];
-				bool improved = false;
 
-				if (std::isfinite(iterBest) && iterBest < bestLoss)
-				{
-					bestLoss = iterBest;
-					bestRaw.assign(
-						params.begin() + (size_t)bestIndex * NumParams,
-						params.begin() + (size_t)(bestIndex + 1) * NumParams);
+				std::vector<CheckpointUpdate> checkpointUpdates;
+				if (!UpdateCheckpoints(order, checkpointUpdates))
+					return false;
+
+				if (!bestRaw.empty() && std::isfinite(bestLoss))
 					center = bestRaw;
-					improved = true;
-					if (!SaveBestCheckpoint())
-						return false;
-				}
 
 				UpdateSearchDistribution(order);
-				PrintIterationStats(iteration, losses, order, cfg.eliteCount, bestLoss, radius, improved);
+				PrintIterationStats(iteration, iterBest, bestLoss);
+				PrintCheckpointUpdates(checkpointUpdates);
 				++iteration;
 				return true;
 			}
@@ -1111,9 +1301,11 @@ namespace ReverbCLTest
 			Vec weights;
 
 			std::vector<float> params;
+			std::vector<float> evalParams;
 			std::vector<float> losses;
 			std::vector<float> bestRaw;
 			std::vector<float> radius;
+			CheckpointArchive checkpointArchive;
 
 			float sigma = 1.0f;
 			float mueff = 1.0f;
@@ -1191,6 +1383,7 @@ namespace ReverbCLTest
 				evolutionSigma = Vec::Zero(NumParams);
 
 				params.assign((size_t)cfg.numTasks * NumParams, 0.0f);
+				evalParams.assign((size_t)cfg.numTasks * NumParams, 0.0f);
 				losses.assign(cfg.numTasks, 0.0f);
 				bestRaw.assign(NumParams, 0.0f);
 				radius.assign(NumParams, sigma);
@@ -1225,6 +1418,11 @@ namespace ReverbCLTest
 					Vec x = mean + sigma * y;
 					CopyVectorToCandidate(task, x);
 				}
+			}
+
+			void BuildEvalParams()
+			{
+				NormalizeRoomParamBatch(params, cfg.numTasks, evalParams);
 			}
 
 			Vec CandidateVector(int task) const
@@ -1332,29 +1530,46 @@ namespace ReverbCLTest
 					evolutionSigma.norm());
 			}
 
-			bool SaveBestCheckpoint()
+			bool SaveCheckpointSlot(int slot, const std::vector<float>& raw)
 			{
 				if (cfg.checkpointWriter)
 				{
 					std::vector<float> normalized;
-					NormalizeParams(bestRaw, normalized);
-					if (!cfg.checkpointWriter(normalized))
+					NormalizeParams(raw, normalized);
+					if (!cfg.checkpointWriter(slot + 1, normalized))
 					{
 						std::printf("CMAOptimizer: failed to write checkpoint.txt/checkpoint.wav\n");
 						return false;
 					}
-
-					std::printf("CMAOptimizer: saved checkpoint loss=%.9g\n", bestLoss);
 					return true;
 				}
 
-				if (!SaveCheckpoint(evaluator, bestRaw, cfg.checkpointSamples))
+				if (!SaveCheckpoint(evaluator, raw, cfg.checkpointSamples))
 				{
 					std::printf("CMAOptimizer: failed to write checkpoint.txt/checkpoint.wav\n");
 					return false;
 				}
 
-				std::printf("CMAOptimizer: saved checkpoint loss=%.9g\n", bestLoss);
+				return true;
+			}
+
+			bool UpdateCheckpoints(const std::vector<int>& order, std::vector<CheckpointUpdate>& updates)
+			{
+				std::vector<int> changedSlots;
+				checkpointArchive.UpdateFromBatch(params, losses, order, updates, changedSlots);
+
+				if (checkpointArchive.HasBest())
+				{
+					bestLoss = checkpointArchive.BestLoss();
+					bestRaw = checkpointArchive.BestRaw();
+				}
+
+				for (int slot : changedSlots)
+				{
+					if (!SaveCheckpointSlot(slot, checkpointArchive.RawAt(slot)))
+						return false;
+				}
+
 				return true;
 			}
 
@@ -1376,8 +1591,9 @@ namespace ReverbCLTest
 			bool Step()
 			{
 				BuildCandidates();
+				BuildEvalParams();
 
-				if (!evaluator.Evaluate(params.data(), cfg.numTasks, losses))
+				if (!evaluator.Evaluate(evalParams.data(), cfg.numTasks, losses))
 					return false;
 
 				for (float& loss : losses)
@@ -1397,22 +1613,15 @@ namespace ReverbCLTest
 
 				const int bestIndex = order.front();
 				const float iterBest = losses[bestIndex];
-				bool improved = false;
 
-				if (std::isfinite(iterBest) && iterBest < bestLoss)
-				{
-					bestLoss = iterBest;
-					bestRaw.assign(
-						params.begin() + (size_t)bestIndex * NumParams,
-						params.begin() + (size_t)(bestIndex + 1) * NumParams);
-					improved = true;
-					if (!SaveBestCheckpoint())
-						return false;
-				}
+				std::vector<CheckpointUpdate> checkpointUpdates;
+				if (!UpdateCheckpoints(order, checkpointUpdates))
+					return false;
 
 				UpdateDistribution(order);
-				PrintIterationStats(iteration, losses, order, cfg.eliteCount, bestLoss, radius, improved);
+				PrintIterationStats(iteration, iterBest, bestLoss);
 				PrintCMAState();
+				PrintCheckpointUpdates(checkpointUpdates);
 				++iteration;
 				return true;
 			}

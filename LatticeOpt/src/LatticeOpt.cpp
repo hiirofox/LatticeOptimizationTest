@@ -1314,6 +1314,7 @@ namespace IRCheckpoint
 	static void BuildIR(std::vector<float>& roomParams)
 	{
 		s_reverb.SetRoomSize(2400);///////////////////////////////!
+		s_reverb.SetDecayTime(0.9999);
 		s_reverb.SetupRoomCharacteristics(roomParams);
 		s_reverb.Reset();
 
@@ -1399,6 +1400,14 @@ namespace IRCheckpoint
 		return true;
 	}
 
+	static bool EnsureCheckpointFolder()
+	{
+		if (CreateDirectoryA("checkpoints", NULL))
+			return true;
+
+		return GetLastError() == ERROR_ALREADY_EXISTS;
+	}
+
 	static bool SaveParamsTxt(std::vector<float>& roomParams, const char* filename)
 	{
 		FILE* fp = nullptr;
@@ -1420,17 +1429,32 @@ namespace IRCheckpoint
 	}
 
 	// roomParams 必须是可直接传给 SetupRoomCharacteristics 的参数向量
-	static bool Save(std::vector<float>& roomParams)
+	static bool Save(std::vector<float>& roomParams, int checkpointIndex = 0)
 	{
 		if ((int)roomParams.size() != LatticeReverb3::LatticeReverb3::NumRoomParams)
 			return false;
 
 		BuildIR(roomParams);
 
-		if (!SaveWav("checkpoint.wav"))
+		char wavFilename[256];
+		char txtFilename[256];
+		if (checkpointIndex > 0)
+		{
+			if (!EnsureCheckpointFolder())
+				return false;
+			sprintf_s(wavFilename, "checkpoints/checkpoint%d.wav", checkpointIndex);
+			sprintf_s(txtFilename, "checkpoints/checkpoint%d.txt", checkpointIndex);
+		}
+		else
+		{
+			sprintf_s(wavFilename, "checkpoint.wav");
+			sprintf_s(txtFilename, "checkpoint.txt");
+		}
+
+		if (!SaveWav(wavFilename))
 			return false;
 
-		if (!SaveParamsTxt(roomParams, "checkpoint.txt"))
+		if (!SaveParamsTxt(roomParams, txtFilename))
 			return false;
 
 		return true;
@@ -1926,16 +1950,16 @@ float minLoss = 1e30f;
 int main()
 {
 	ReverbCLTest::ReverbCLOptimizer::CMAConfig searchConfig;
-	searchConfig.numTasks = 500;
-	searchConfig.eliteCount = 64;
-	searchConfig.initialSigma = 2.0f;
+	searchConfig.numTasks = 400;
+	searchConfig.eliteCount = 20;
+	searchConfig.initialSigma = 6.0f;
 	searchConfig.minSigma = 0.001f;
-	searchConfig.maxSigma = 12.0f;
+	searchConfig.maxSigma = 16.0f;
 	searchConfig.eigenUpdateEvery = 1;
-	searchConfig.checkpointWriter = [](const std::vector<float>& normalizedRoomParams)
+	searchConfig.checkpointWriter = [](int checkpointIndex, const std::vector<float>& normalizedRoomParams)
 	{
 		std::vector<float> cpuRoomParams = normalizedRoomParams;
-		return IRCheckpoint::Save(cpuRoomParams);
+		return IRCheckpoint::Save(cpuRoomParams, checkpointIndex);
 	};
 
 	return ReverbCLTest::ReverbCLOptimizer::RunCMAForever(searchConfig) ? 0 : 1;
