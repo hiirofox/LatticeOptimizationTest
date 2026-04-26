@@ -821,6 +821,11 @@ public:
 		std::copy(roomParams.begin(), roomParams.end(), outParams.begin());
 	}
 
+	float EvaluateLoss(std::vector<float> params)
+	{
+		return Error(params);
+	}
+
 	void Regularization(std::vector<float>& roomParams)
 	{
 		for (int i = 0; i < NumLayers; ++i)
@@ -863,6 +868,7 @@ public:
 	}
 };
 
+#include "ReverbCLTest.h"
 
 ///////////////////////////////////////////////////////////////////////
 namespace IRPlot2D
@@ -1731,10 +1737,21 @@ namespace IRLoadFromWav
 }
 ///////////////////////////////////////////////////////////////////////
 LatticeOptimizer lattopt;
+LatticeOptimizer cpuRef;
 std::vector<float> roomParams(LatticeOptimizer::NumRoomParams);
 float minLoss = 1e30f;
 int main()
 {
+	if (!ReverbCLTest::RunRandomBatchSelfTest(
+		[](std::vector<float>& params)
+		{
+			return cpuRef.EvaluateLoss(params);
+		}))
+	{
+		printf("OpenCL DSP test failed\n");
+		return 1;
+	}
+
 	//IRTrainDataGen::GenerateDataset(25);
 	//IROutputFromTxt::Render();
 	//IRLoadFromWav::Load("target_ir.wav", lattopt);

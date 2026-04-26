@@ -77,5 +77,13 @@
     <ClInclude Include="src\CL\opencl.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="src\ReverbCLTest.h">
+      <Filter>源文件</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="src\LatticeReverb.cl">
+      <Filter>源文件</Filter>
+    </None>
   </ItemGroup>
 </Project>
