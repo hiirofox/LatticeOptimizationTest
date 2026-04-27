@@ -120,23 +120,24 @@ namespace ReverbCLTest
 		for (int i = 0; i < NumLayers; ++i)
 		{
 			float x = (float)i / NumLayers;
-			normalized[i + 0 * NumLayers] = (x + Soft01(normalized[i + 0 * NumLayers], 0.01f) / NumLayers);//ts
-			normalized[i + 1 * NumLayers] = (x + Soft01(normalized[i + 1 * NumLayers], 0.01f) / NumLayers);
-			normalized[i + 0 * NumLayers] = powf(normalized[i + 0 * NumLayers], 1.5);
-			normalized[i + 1 * NumLayers] = powf(normalized[i + 1 * NumLayers], 1.5);
 
-			normalized[i + 2 * NumLayers] = TanhNo0(normalized[i + 2 * NumLayers], 0.05f) * 0.9f;//ks
-			normalized[i + 3 * NumLayers] = TanhNo0(normalized[i + 3 * NumLayers], 0.05f) * 0.9f;
-			normalized[i + 4 * NumLayers] = Soft01(normalized[i + 4 * NumLayers], 0.9995f) * 0.99999999f;//ds
-			normalized[i + 5 * NumLayers] = Soft01(normalized[i + 5 * NumLayers], 0.9995f) * 0.99999999f;
+			normalized[i + 0 * NumLayers] = (x + Soft01(normalized[i + 0 * NumLayers], 0.001f) / NumLayers);//ts
+			normalized[i + 1 * NumLayers] = (x + Soft01(normalized[i + 1 * NumLayers], 0.001f) / NumLayers);
+			normalized[i + 0 * NumLayers] = powf(normalized[i + 0 * NumLayers], 1.55);
+			normalized[i + 1 * NumLayers] = powf(normalized[i + 1 * NumLayers], 1.55);
+
+			normalized[i + 2 * NumLayers] = TanhNo0(normalized[i + 2 * NumLayers], 0.05f) * 0.99f;//ks
+			normalized[i + 3 * NumLayers] = TanhNo0(normalized[i + 3 * NumLayers], 0.05f) * 0.99f;
+			normalized[i + 4 * NumLayers] = Soft01(normalized[i + 4 * NumLayers], 0.999f) * 0.99999999f;//ds
+			normalized[i + 5 * NumLayers] = Soft01(normalized[i + 5 * NumLayers], 0.999f) * 0.99999999f;
 			normalized[i + 6 * NumLayers] = Soft01(normalized[i + 6 * NumLayers], 0.01f);//outks
 			normalized[i + 7 * NumLayers] = Soft01(normalized[i + 7 * NumLayers], 0.01f);
 		}
 
 		normalized[8 * NumLayers + 2] = Soft01(normalized[8 * NumLayers + 2], 0.01f);//fbt
 		normalized[8 * NumLayers + 3] = Soft01(normalized[8 * NumLayers + 3], 0.01f);
-		normalized[8 * NumLayers + 0] = -Soft01(normalized[8 * NumLayers + 0], 0.75f) * 0.99999999f;//fbd
-		normalized[8 * NumLayers + 1] = -Soft01(normalized[8 * NumLayers + 1], 0.75f) * 0.99999999f;
+		normalized[8 * NumLayers + 0] = Soft01(normalized[8 * NumLayers + 0], 0.75f) * 0.99999999f;//fbd
+		normalized[8 * NumLayers + 1] = Soft01(normalized[8 * NumLayers + 1], 0.75f) * 0.99999999f;
 	}
 
 	inline void NormalizeRoomParamVector(const std::vector<float>& raw, std::vector<float>& normalized)

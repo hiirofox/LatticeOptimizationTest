@@ -1953,7 +1953,7 @@ int main()
 	searchConfig.numTasks = 400;
 	searchConfig.eliteCount = 20;
 	searchConfig.initialSigma = 6.0f;
-	searchConfig.minSigma = 0.001f;
+	searchConfig.minSigma = 0.1f;
 	searchConfig.maxSigma = 16.0f;
 	searchConfig.eigenUpdateEvery = 1;
 	searchConfig.checkpointWriter = [](int checkpointIndex, const std::vector<float>& normalizedRoomParams)

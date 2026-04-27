@@ -32,10 +32,10 @@
 
 // Training-time ReverbParams. Optimization still only searches RoomParams.
 // Checkpoint export can use a different CPU-side ReverbParams path.
-#define LR_TRAIN_ROOM_SIZE 120.0f
-#define LR_TRAIN_DECAY_TIME 0.999f
+#define LR_TRAIN_ROOM_SIZE 160.0
+#define LR_TRAIN_DECAY_TIME 0.99999f
 #define LR_TRAIN_DIFFUSION 1.0f
-#define LR_TRAIN_MIX_TAP_DIRECT 0.95f
+#define LR_TRAIN_MIX_TAP_DIRECT 0.999f
 
 typedef struct DelayLineCL
 {
@@ -467,7 +467,7 @@ static float lr_eval_loss_one(const __global float* normalizedParams, __global f
 	for (int i = 1; i < LR_AUTO_FFT_SIZE - 1; ++i)
 	{
 		float x = (float)i / (float)LR_AUTO_FFT_SIZE;
-		x = 1.0 + x * x * 0.5;//总之抬一下尾部相关
+		x = 1.0 + x * x * 2.0;//总之抬一下尾部相关
 		autocorrl[i] *= x;
 		autocorrr[i] *= x;
 		if (maxcorrl < autocorrl[i])
